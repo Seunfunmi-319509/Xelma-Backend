@@ -247,11 +247,33 @@ model Prediction {
   won    Boolean?
   payout Decimal? @db.Decimal(18, 8)
 
+  // Chain execution state — tracks Soroban submission lifecycle.
+  // UP_DOWN predictions start as PENDING; LEGENDS start as NOT_REQUIRED.
+  chainStatus        PredictionChainStatus @default(PENDING)
+  txHash             String?               @unique
+  chainAttemptCount  Int                   @default(0)
+  chainFailureReason String?
+  chainSubmittedAt   DateTime?
+  chainConfirmedAt   DateTime?
+  chainFailedAt      DateTime?
+  compensatedAt      DateTime?
+
   createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
 
   @@unique([roundId, userId])
   @@index([userId])
   @@index([roundId])
+  @@index([chainStatus])
+}
+
+enum PredictionChainStatus {
+  NOT_REQUIRED
+  PENDING
+  SUBMITTED
+  CONFIRMED
+  FAILED
+  NEEDS_MANUAL_REVIEW
 }
 
 enum BetStatus {
