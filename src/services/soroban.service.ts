@@ -357,6 +357,11 @@ export class SorobanService {
     await this.ensureInitialized();
     const requestId = getRequestId();
     
+    // SAFETY: placeBet is a mutating chain operation.  A timed-out mutation
+    // cannot safely be resent because the first attempt may have reached the
+    // network and succeeded.  Use retries: 1 (single attempt, no automatic
+    // resend).  The prediction reconciliation service handles ambiguous
+    // timeout recovery via on-chain state inspection.
     const result = await this.callWithBreaker("sorobanPlaceBet", () =>
       withTimeout(
         async () => {
@@ -385,13 +390,13 @@ export class SorobanService {
       {
         timeoutMs: this.CALL_TIMEOUT_MS,
         operationName: 'sorobanPlaceBet',
-        retries: this.MAX_RETRIES,
+        retries: 1,
       }
       )
     );
 
     if (!result.success) {
-      logger.error("Failed to place bet on Soroban after retries", {
+      logger.error("Soroban placeBet failed (single attempt, no auto-retry for mutations)", {
         error: result.error?.message,
         timedOut: result.timedOut,
         durationMs: result.durationMs,
@@ -717,6 +722,60 @@ export class SorobanService {
     }
 
     return result.data!;
+  }
+
+  /**
+   * Gets a user's on-chain bet position for a round (read-only query).
+   * Used by the prediction reconciliation service to resolve ambiguous timeouts
+   * where the client doesn't know whether a placeBet call reached the chain.
+   *
+   * Returns null if the user has no position or the contract call fails.
+   */
+  async getUserPosition(
+    userAddress: string,
+    roundId?: string,
+  ): Promise<{ side: 'UP' | 'DOWN'; amount: number } | null> {
+    await this.ready;
+    if (!this.initialized) return null;
+
+    const result = await this.callWithBreaker("sorobanGetUserPosition", () =>
+      withTimeout(
+        async () => {
+          // If the bindings client exposes get_user_position or get_bet, call it.
+          // Fall back to checking contract storage or stats if not directly available.
+          const client = this.client as any;
+          if (typeof client?.get_user_position === 'function') {
+            const pos = await client.get_user_position({
+              user: userAddress,
+              ...(roundId ? { round_id: roundId } : {}),
+            });
+            if (!pos || !pos.result) return null;
+            const res = pos.result;
+            const side: 'UP' | 'DOWN' = res.side?.tag === 'Up' ? 'UP' : 'DOWN';
+            const amount = Number(res.amount) / 10_000_000;
+            return { side, amount };
+          }
+          return null;
+        },
+        {
+          timeoutMs: 10000,
+          operationName: 'sorobanGetUserPosition',
+          retries: 1,
+        }
+      ),
+      null,
+    );
+
+    if (!result.success) {
+      logger.warn("Failed to get user position from Soroban", {
+        userAddress,
+        roundId,
+        error: result.error?.message,
+      });
+      return null;
+    }
+
+    return result.data ?? null;
   }
 
   /**

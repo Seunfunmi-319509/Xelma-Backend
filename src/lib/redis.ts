@@ -437,6 +437,17 @@ export function getRedisClient(): RedisClientType | null {
 }
 
 /**
+ * Returns `true` when a `REDIS_URL` has been set in the environment,
+ * regardless of whether a connection has been established.  Used by the
+ * distributed-idempotency lock to distinguish "Redis not configured"
+ * (safe to skip in memory/hackathon mode) from "Redis configured but
+ * unreachable" (must fail closed).
+ */
+export function isRedisConfigured(): boolean {
+  return getRedisUrl() !== null;
+}
+
+/**
  * Closes the shared Redis client and resets connection state. Used by tests
  * that connect to a real Redis so Jest workers can exit cleanly.
  */

@@ -97,6 +97,9 @@ export class ResolutionService {
             where: { id: roundId },
             include: {
                predictions: {
+                  where: {
+                     chainStatus: { in: ['CONFIRMED', 'NOT_REQUIRED'] },
+                  },
                   include: {
                      user: true,
                   },
@@ -135,6 +138,9 @@ export class ResolutionService {
                where: { id: roundId },
                include: {
                   predictions: {
+                     where: {
+                        chainStatus: { in: ['CONFIRMED', 'NOT_REQUIRED'] },
+                     },
                      include: {
                         user: true,
                      },

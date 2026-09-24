@@ -15,6 +15,7 @@ import websocketService from './websocket.service';
 import outboxService, { OutboxDispatchHandlers, getOutboxPollIntervalSeconds } from './outbox.service';
 import reconciliationService from './reconciliation.service';
 import payoutReconciliationService from './payout-reconciliation.service';
+import predictionReconciliationService from './prediction-reconciliation.service';
 import {
    schedulerItemsProcessedTotal,
    schedulerRunsTotal,
@@ -94,8 +95,17 @@ class SchedulerService {
                await this.reconcileBets();
             })
          );
+
+         // Prediction reconciliation (Issue 2) — sweeps stranded PENDING/SUBMITTED
+         // predictions to verify on-chain status and prevent divergence.
+         logger.info('Starting prediction reconciliation scheduler (interval: 60s)');
+         this.cronTasks.push(
+            cron.schedule('* * * * *', async () => {
+               await this.reconcilePredictions();
+            })
+         );
       } else {
-         logger.info('Bet reconciliation scheduler disabled (Soroban keys not configured)');
+         logger.info('Bet & prediction reconciliation scheduler disabled (Soroban keys not configured)');
       }
 
       // Payout reconciliation (#492) — sweeps stuck pending winnings and
@@ -584,6 +594,56 @@ private async cleanupOutboxInternal(lock: LockHandle): Promise<void> {
           logger.error('Error in bet reconciliation scheduler:', error);
           schedulerRunsTotal.inc({
              job: 'bet_reconciliation',
+             outcome: 'failure',
+          });
+       }
+    }
+
+    /**
+     * Reconcile stranded PENDING/SUBMITTED predictions (Issue 2).
+     * Protected by a distributed lock so only one instance runs per interval.
+     * @visibleForTesting
+     */
+    async reconcilePredictions(): Promise<void> {
+       await withDistributedLock(
+          'reconcile-predictions',
+          lock => this.reconcilePredictionsInternal(lock),
+          { ttlSeconds: 70, maxHoldSeconds: 600 }
+       );
+    }
+
+    private async reconcilePredictionsInternal(lock: LockHandle): Promise<void> {
+       try {
+          lock.assertHeld();
+          const result = await predictionReconciliationService.reconcilePredictions();
+          if (result.checked > 0) {
+             logger.info('Prediction reconciliation completed', result);
+             for (let i = 0; i < result.checked; i++) {
+                schedulerItemsProcessedTotal.inc({
+                   job: 'prediction_reconciliation',
+                   outcome: 'success',
+                });
+             }
+          }
+          schedulerRunsTotal.inc({
+             job: 'prediction_reconciliation',
+             outcome: result.errors > 0 ? 'failure' : 'success',
+          });
+       } catch (error) {
+          if (isLockLostError(error)) {
+             logger.warn('Aborted prediction reconciliation: distributed lock lost', {
+                reason: error.reason,
+             });
+             schedulerRunsTotal.inc({
+                job: 'prediction_reconciliation',
+                outcome: 'aborted',
+             });
+             return;
+          }
+
+          logger.error('Error in prediction reconciliation scheduler:', error);
+          schedulerRunsTotal.inc({
+             job: 'prediction_reconciliation',
              outcome: 'failure',
           });
        }
