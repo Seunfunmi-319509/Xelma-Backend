@@ -169,7 +169,7 @@ jobs:
         run: npm ci
 
       - name: Run database migrations
-        run: npx prisma migrate deploy
+        run: npm run db:migrate
 
       - name: Run integration tests
         run: npm run test:integration
@@ -211,7 +211,7 @@ jobs:
         run: npm ci
 
       - name: Run database migrations
-        run: npx prisma migrate deploy
+        run: npm run db:migrate
 
       - name: Run hackathon HTTP tests
         run: npm run test:hackathon:http

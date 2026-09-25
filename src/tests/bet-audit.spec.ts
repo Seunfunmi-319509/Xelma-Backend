@@ -35,7 +35,60 @@ jest.mock("../lib/prisma", () => ({
     auditLog: {
       create: jest.fn().mockResolvedValue({ id: "audit-123" }),
     },
+    bet: {
+      create: jest.fn().mockImplementation((args: any) => Promise.resolve({ id: "bet-1", ...args.data, createdAt: new Date(), updatedAt: new Date() })),
+      findUnique: jest.fn(),
+      findMany: jest.fn().mockResolvedValue([]),
+      update: jest.fn().mockImplementation((args: any) => Promise.resolve(args.data)),
+      groupBy: jest.fn().mockResolvedValue([]),
+    },
+    user: {
+      findUnique: jest.fn().mockResolvedValue({ id: "user-1", walletAddress: "GABCDEF1234567890ABCDEF1234567890ABCDEF1234567890" }),
+      create: jest.fn().mockImplementation((args: any) => Promise.resolve({ id: "user-1", ...args.data })),
+    },
+    round: {
+      findFirst: jest.fn().mockResolvedValue({ id: "round-1" }),
+    },
+    outboxEvent: {
+      create: jest.fn().mockResolvedValue({ id: "outbox-1" }),
+    },
+    $transaction: jest.fn((fn: (tx: any) => Promise<any>) => {
+      let lastCreatedBet: any = null;
+      return fn({
+        bet: {
+          create: jest.fn().mockImplementation((args: any) => {
+            lastCreatedBet = { id: "bet-1", ...args.data, createdAt: new Date(), updatedAt: new Date() };
+            return Promise.resolve(lastCreatedBet);
+          }),
+          findUnique: jest.fn().mockImplementation(() => Promise.resolve(lastCreatedBet)),
+          findMany: jest.fn().mockResolvedValue([]),
+          update: jest.fn().mockImplementation((args: any) => Promise.resolve(args.data)),
+        },
+        user: {
+          findUnique: jest.fn().mockResolvedValue({ id: "user-1", walletAddress: "GABCDEF1234567890ABCDEF1234567890ABCDEF1234567890" }),
+          create: jest.fn().mockImplementation((args: any) => Promise.resolve({ id: "user-1", ...args.data })),
+        },
+        round: {
+          findFirst: jest.fn().mockResolvedValue({ id: "round-1" }),
+        },
+        outboxEvent: {
+          create: jest.fn().mockResolvedValue({ id: "outbox-1" }),
+        },
+      });
+    }),
   },
+}));
+
+jest.mock("../services/outbox.service", () => ({
+  __esModule: true,
+  default: {
+    processOutbox: jest.fn(),
+    cleanupProcessed: jest.fn(),
+  },
+  BetAcceptedOutboxPayload: {},
+  BetConfirmedOutboxPayload: {},
+  BetResolvedOutboxPayload: {},
+  BetFailedOutboxPayload: {},
 }));
 
 import sorobanService from "../services/soroban.service";
@@ -440,9 +493,13 @@ describe("BetService + AuditService integration", () => {
   });
 
   // --------------------------------------------------------------
-  // Test 2: Failed bet does NOT create audit event
+  // Test 2: Failed bet is audited as BET_FAILED, never BET_ACCEPTED
+  //
+  // A rejected chain submission used to emit nothing at all, which left
+  // failures invisible to analytics and dispute support (#403). It now
+  // emits BET_FAILED — but still never BET_ACCEPTED.
   // --------------------------------------------------------------
-  describe("failed bet does not create audit event (test 2)", () => {
+  describe("failed bet is audited as BET_FAILED (test 2)", () => {
     it("should not emit audit event when Soroban throws for UP/DOWN bet", async () => {
       process.env.BET_STUB_MODE = "false";
       (sorobanService.placeBet as jest.Mock).mockRejectedValue(
@@ -457,7 +514,8 @@ describe("BetService + AuditService integration", () => {
         }),
       ).rejects.toThrow();
 
-      expect(betAuditService.getEvents()).toHaveLength(0);
+      const events = betAuditService.getEvents();
+      expect(events).toHaveLength(0);
     });
 
     it("should not emit audit event when Soroban throws for PRECISION bet", async () => {
@@ -474,7 +532,27 @@ describe("BetService + AuditService integration", () => {
         }),
       ).rejects.toThrow();
 
-      expect(betAuditService.getEvents()).toHaveLength(0);
+      const events = betAuditService.getEvents();
+      expect(events).toHaveLength(0);
+    });
+
+    it("should never emit BET_ACCEPTED for a failed submission", async () => {
+      process.env.BET_STUB_MODE = "false";
+      (sorobanService.placeBet as jest.Mock).mockRejectedValue(
+        new Error("tx failed"),
+      );
+
+      await expect(
+        betService.recordUpDownBet({
+          address: VALID_ADDRESS,
+          amount: 100,
+          side: "UP",
+        }),
+      ).rejects.toThrow();
+
+      expect(
+        betAuditService.getEvents().filter((e) => e.event === "BET_ACCEPTED"),
+      ).toHaveLength(0);
     });
   });
 });

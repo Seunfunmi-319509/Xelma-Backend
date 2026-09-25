@@ -40,6 +40,7 @@ jest.mock('../middleware/rateLimiter.middleware', () => ({
   chatMessageRateLimiter: (_req: any, _res: any, next: any) => next(),
   adminRoundRateLimiter: (_req: any, _res: any, next: any) => next(),
   oracleResolveRateLimiter: (_req: any, _res: any, next: any) => next(),
+  betRateLimiter: (_req: any, _res: any, next: any) => next(),
   predictionRateLimiter: (_req: any, _res: any, next: any) => next(),
   batchPredictionRateLimiter: (_req: any, _res: any, next: any) => next(),
   batchLeaderboardRateLimiter: (_req: any, _res: any, next: any) => next(),

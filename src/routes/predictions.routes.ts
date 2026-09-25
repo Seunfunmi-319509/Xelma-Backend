@@ -3,6 +3,7 @@ import {
    authenticateUser,
    AuthenticatedRequest,
 } from '../middleware/auth.middleware';
+import { asyncHandler } from '../middleware/errorHandler.middleware';
 import {
    batchPredictionRateLimiter,
    predictionRateLimiter,
@@ -12,31 +13,41 @@ import {
    batchSubmitPredictionsSchema,
    submitPredictionSchema,
 } from '../schemas/predictions.schema';
-import predictionService from '../services/prediction.service';
+import predictionService, {
+   type PredictionRow,
+} from '../services/prediction.service';
 import {
-   checkIdempotency,
+   acquireIdempotencyLock,
+   releaseIdempotencyLock,
+   IDEMPOTENCY_STORE_UNAVAILABLE,
+   IdempotencyStoreUnavailableError,
    isValidIdempotencyKey,
    storeIdempotencyResult,
 } from '../utils/idempotency.util';
-import { ConflictError, ErrorCode, ValidationError } from '../utils/errors';
-import { toNumber, toDecimalString } from '../utils/decimal.util';
+import {
+   ConflictError,
+   ErrorCode,
+   ExternalServiceError,
+   ValidationError,
+} from '../utils/errors';
+import { serializePrediction, serializeRound } from '../serializers/monetary.serializer';
 
 const router = Router();
 const SUBMIT_PREDICTION_ENDPOINT = '/api/predictions/submit';
 
-function buildSubmitPredictionResponse(prediction: any) {
+function buildSubmitPredictionResponse(prediction: PredictionRow) {
    return {
       success: true,
-      prediction: {
+      prediction: serializePrediction({
          id: prediction.id,
          roundId: prediction.roundId,
          userId: prediction.userId,
-         amount: toDecimalString(prediction.amount),
+         amount: prediction.amount,
          side: prediction.side,
          priceRange: prediction.priceRange ?? null,
          createdAt:
             prediction.createdAt?.toISOString?.() ?? prediction.createdAt,
-      },
+      }),
    };
 }
 
@@ -96,14 +107,14 @@ router.post(
    authenticateUser,
    predictionRateLimiter,
    validate(submitPredictionSchema),
-   (async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
-      try {
-         const { roundId, amount, side, priceRange } = req.body;
-         const userId = req.user.userId;
-         const idempotencyKey = req.headers['idempotency-key'] as
-            | string
-            | undefined;
+   asyncHandler(async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+      const { roundId, amount, side, priceRange } = req.body;
+      const userId = req.user.userId;
+      const idempotencyKey = req.headers['idempotency-key'] as string | undefined;
+      let lockAcquired = false;
+      let operationCompleted = false;
 
+      try {
          // Validate idempotency key if provided
          if (idempotencyKey && !isValidIdempotencyKey(idempotencyKey)) {
             throw new ValidationError(
@@ -111,31 +122,36 @@ router.post(
             );
          }
 
-         // Check for cached response from previous identical request
+         // Acquire in-process/DB idempotency lock (mutex + replay cache)
          if (idempotencyKey) {
-            const idempotencyCheck = await checkIdempotency(
+            const lockResult = await acquireIdempotencyLock(
                userId,
                SUBMIT_PREDICTION_ENDPOINT,
                idempotencyKey,
-               { roundId, amount, side, priceRange }
+               { roundId, amount, side, priceRange },
             );
 
-            if (
-               idempotencyCheck.isIdempotent &&
-               idempotencyCheck.cachedResponse
-            ) {
-               // Return cached response
+            if (lockResult.isIdempotent && lockResult.cachedResponse) {
                return res
-                  .status(idempotencyCheck.cachedResponse.status)
-                  .json(idempotencyCheck.cachedResponse.body);
+                  .status(lockResult.cachedResponse.status)
+                  .json(lockResult.cachedResponse.body);
             }
 
-            if (idempotencyCheck.error) {
+            if (lockResult.error === IDEMPOTENCY_STORE_UNAVAILABLE) {
+               throw new ExternalServiceError(
+                  'Idempotency store unavailable. Please try again.',
+                  ErrorCode.EXTERNAL_SERVICE_ERROR
+               );
+            }
+
+            if (lockResult.error) {
                throw new ConflictError(
-                  idempotencyCheck.error,
+                  lockResult.error,
                   ErrorCode.IDEMPOTENCY_KEY_CONFLICT
                );
             }
+
+            lockAcquired = !!lockResult.lockAcquired;
          }
 
          const prediction = await predictionService.submitPrediction(
@@ -145,10 +161,11 @@ router.post(
             side,
             priceRange
          );
+         operationCompleted = true;
 
          const responseBody = buildSubmitPredictionResponse(prediction);
 
-         if (idempotencyKey) {
+         if (idempotencyKey && lockAcquired) {
             await storeIdempotencyResult(
                userId,
                SUBMIT_PREDICTION_ENDPOINT,
@@ -161,9 +178,21 @@ router.post(
 
          res.json(responseBody);
       } catch (error) {
+         if (idempotencyKey && lockAcquired && !operationCompleted) {
+            await releaseIdempotencyLock(userId, SUBMIT_PREDICTION_ENDPOINT, idempotencyKey);
+         }
+
+         if (error instanceof IdempotencyStoreUnavailableError) {
+            return next(
+               new ExternalServiceError(
+                  'Idempotency store unavailable. Please try again.',
+                  ErrorCode.EXTERNAL_SERVICE_ERROR
+               )
+            );
+         }
          next(error);
       }
-   }) as any
+   })
 );
 
 /**
@@ -204,24 +233,20 @@ router.post(
    authenticateUser,
    batchPredictionRateLimiter,
    validate(batchSubmitPredictionsSchema),
-   (async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
-      try {
-         const { predictions } = req.body;
-         const userId = req.user.userId;
+   asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+      const { predictions } = req.body;
+      const userId = req.user.userId;
 
-         const result = await predictionService.submitBatchPredictions(
-            userId,
-            predictions
-         );
+      const result = await predictionService.submitBatchPredictions(
+         userId,
+         predictions
+      );
 
-         res.json({
-            ...result,
-            success: true,
-         });
-      } catch (error) {
-         next(error);
-      }
-   }) as any
+      res.json({
+         ...result,
+         success: true,
+      });
+   })
 );
 
 /**
@@ -236,45 +261,43 @@ router.post(
  *       200:
  *         description: List of predictions
  */
-router.get('/user', authenticateUser, (async (
-   req: AuthenticatedRequest,
-   res: Response,
-   next: NextFunction
-) => {
-   try {
+router.get(
+   '/user',
+   authenticateUser,
+   asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
       const userId = req.user.userId;
 
       const predictions = await predictionService.getUserPredictions(userId);
 
-      const serializedPredictions = predictions.map((p: any) => ({
-         id: p.id,
-         roundId: p.roundId,
-         userId: p.userId,
-         amount: toDecimalString(p.amount),
-         side: p.side,
-         priceRange: p.priceRange,
-         payout: p.payout !== null && p.payout !== undefined ? toDecimalString(p.payout) : null,
-         won: p.won,
-         createdAt: p.createdAt?.toISOString?.() ?? p.createdAt,
-         round: p.round
-            ? {
-                 id: p.round.id,
-                 mode: p.round.mode,
-                 status: p.round.status,
-                 startPrice: toDecimalString(p.round.startPrice),
-                 endPrice: p.round.endPrice !== null && p.round.endPrice !== undefined ? toDecimalString(p.round.endPrice) : null,
-              }
-            : null,
-      }));
+      const serializedPredictions = predictions.map((p) =>
+         serializePrediction({
+            id: p.id,
+            roundId: p.roundId,
+            userId: p.userId,
+            amount: p.amount,
+            side: p.side,
+            priceRange: p.priceRange,
+            payout: p.payout,
+            won: p.won,
+            createdAt: p.createdAt?.toISOString?.() ?? p.createdAt,
+            round: p.round
+               ? serializeRound({
+                    id: p.round.id,
+                    mode: p.round.mode,
+                    status: p.round.status,
+                    startPrice: p.round.startPrice,
+                    endPrice: p.round.endPrice,
+                 })
+               : null,
+         }),
+      );
 
       res.json({
          success: true,
          predictions: serializedPredictions,
       });
-   } catch (error) {
-      next(error);
-   }
-}) as any);
+   })
+);
 
 /**
  * @openapi
@@ -294,21 +317,21 @@ router.get('/user', authenticateUser, (async (
  */
 router.get(
    '/round/:roundId',
-   async (req: Request, res: Response, next: NextFunction) => {
-      try {
-         const { roundId } = req.params;
+   asyncHandler(async (req: Request, res: Response) => {
+      const { roundId } = req.params;
 
-         const predictions =
-            await predictionService.getRoundPredictions(roundId);
+      const predictions =
+         await predictionService.getRoundPredictions(roundId);
 
-         const serializedPredictions = predictions.map((p: any) => ({
+      const serializedPredictions = predictions.map((p) =>
+         serializePrediction({
             id: p.id,
             roundId: p.roundId,
             userId: p.userId,
-            amount: toDecimalString(p.amount),
+            amount: p.amount,
             side: p.side,
             priceRange: p.priceRange,
-            payout: p.payout !== null && p.payout !== undefined ? toDecimalString(p.payout) : null,
+            payout: p.payout,
             won: p.won,
             createdAt: p.createdAt?.toISOString?.() ?? p.createdAt,
             user: p.user
@@ -317,16 +340,14 @@ router.get(
                     walletAddress: p.user.walletAddress,
                  }
                : null,
-         }));
+         }),
+      );
 
-         res.json({
-            success: true,
-            predictions: serializedPredictions,
-         });
-      } catch (error) {
-         next(error);
-      }
-   }
+      res.json({
+         success: true,
+         predictions: serializedPredictions,
+      });
+   })
 );
 
 export default router;

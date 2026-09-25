@@ -1,9 +1,12 @@
 import { describe, it, expect, beforeAll, afterAll, jest } from "@jest/globals";
 import request from "supertest";
 import { Express } from "express";
-import { createApp } from "../index";
+import { UserRole } from "@prisma/client";
+import { createApp } from "../app-factory";
 import { generateToken } from "../utils/jwt.util";
 import { Decimal } from "@prisma/client/runtime/library";
+import { toDecimalString, serializeMoney } from "../utils/decimal.util";
+import { assertNoNumericMoney } from "../serializers/monetary.serializer";
 
 const MOCK_USER_ID = "serial-test-user";
 const MOCK_WALLET = "GSERIAL_TEST_WALLET_ADDRESS________________";
@@ -41,6 +44,7 @@ jest.mock("../lib/prisma", () => ({
       findMany: (...args: any[]) => mockNotificationFindMany(...args),
       count: (...args: any[]) => mockNotificationCount(...args),
     },
+    $transaction: (ops: any[]) => Promise.all(ops),
     $disconnect: jest.fn().mockResolvedValue(undefined),
   },
 }));
@@ -53,9 +57,9 @@ jest.mock("../middleware/rateLimiter.middleware", () => ({
   predictionRateLimiter: (_req: any, _res: any, next: any) => next(),
   adminRoundRateLimiter: (_req: any, _res: any, next: any) => next(),
   oracleResolveRateLimiter: (_req: any, _res: any, next: any) => next(),
+  betRateLimiter: (_req: any, _res: any, next: any) => next(),
   batchPredictionRateLimiter: (_req: any, _res: any, next: any) => next(),
   batchLeaderboardRateLimiter: (_req: any, _res: any, next: any) => next(),
-  adminRoundRateLimiter: (_req: any, _res: any, next: any) => next(),
 }));
 
 describe("Monetary Field Serialization in API Responses", () => {
@@ -63,8 +67,8 @@ describe("Monetary Field Serialization in API Responses", () => {
   let token: string;
 
   beforeAll(() => {
-    app = createApp();
-    token = generateToken(MOCK_USER_ID, MOCK_WALLET, "USER");
+    app = createApp({ mode: "full" });
+    token = generateToken(MOCK_USER_ID, MOCK_WALLET, UserRole.USER);
   });
 
   afterAll(async () => {
@@ -79,6 +83,12 @@ describe("Monetary Field Serialization in API Responses", () => {
     mockTransactionFindMany.mockReset();
     mockTransactionCount.mockReset();
     mockPredictionFindMany.mockReset();
+    mockUserFindUnique.mockResolvedValue({
+      id: MOCK_USER_ID,
+      walletAddress: MOCK_WALLET,
+      role: UserRole.USER,
+      virtualBalance: new Decimal("0"),
+    });
   });
 
   describe("user routes", () => {
@@ -87,6 +97,7 @@ describe("Monetary Field Serialization in API Responses", () => {
       mockUserFindUnique.mockResolvedValue({
         id: MOCK_USER_ID,
         walletAddress: MOCK_WALLET,
+        role: UserRole.USER,
         virtualBalance: decimalBalance,
       });
 
@@ -96,9 +107,10 @@ describe("Monetary Field Serialization in API Responses", () => {
 
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
-      expect(typeof res.body.balance).toBe("string");
-      expect(res.body.balance).toBe("1000.33333333");
-      expect(res.body.balance).not.toContain("$numberDecimal");
+      expect(typeof res.body.data.balance).toBe("string");
+      expect(res.body.data.balance).toBe("1000.33333333");
+      expect(res.body.data.balance).not.toContain("$numberDecimal");
+      assertNoNumericMoney(res.body);
     });
 
     it("returns profile balance as decimal string", async () => {
@@ -106,6 +118,7 @@ describe("Monetary Field Serialization in API Responses", () => {
       mockUserFindUnique.mockResolvedValue({
         id: MOCK_USER_ID,
         walletAddress: MOCK_WALLET,
+        role: UserRole.USER,
         nickname: "test",
         avatarUrl: null,
         preferences: null,
@@ -120,8 +133,9 @@ describe("Monetary Field Serialization in API Responses", () => {
         .set("Authorization", `Bearer ${token}`);
 
       expect(res.status).toBe(200);
-      expect(typeof res.body.profile.balance).toBe("string");
-      expect(res.body.profile.balance).toBe("42.00000001");
+      expect(typeof res.body.data.profile.balance).toBe("string");
+      expect(res.body.data.profile.balance).toBe("42.00000001");
+      assertNoNumericMoney(res.body);
     });
 
     it("returns user stats with decimal string earnings", async () => {
@@ -143,13 +157,14 @@ describe("Monetary Field Serialization in API Responses", () => {
         .set("Authorization", `Bearer ${token}`);
 
       expect(res.status).toBe(200);
-      const s = res.body.stats;
+      const s = res.body.data.stats;
       expect(typeof s.totalEarnings).toBe("string");
       expect(s.totalEarnings).toBe("99.12345678");
       expect(typeof s.upDownEarnings).toBe("string");
       expect(s.upDownEarnings).toBe("60.50000000");
       expect(typeof s.legendsEarnings).toBe("string");
       expect(s.legendsEarnings).toBe("38.62345678");
+      assertNoNumericMoney(res.body);
     });
 
     it("returns transaction amount as decimal string", async () => {
@@ -174,6 +189,7 @@ describe("Monetary Field Serialization in API Responses", () => {
       expect(res.body.data.length).toBe(1);
       expect(typeof res.body.data[0].amount).toBe("string");
       expect(res.body.data[0].amount).toBe("500.00000001");
+      assertNoNumericMoney(res.body);
     });
   });
 
@@ -208,6 +224,7 @@ describe("Monetary Field Serialization in API Responses", () => {
       expect(r.poolUp).toBe("100.10000000");
       expect(typeof r.poolDown).toBe("string");
       expect(r.poolDown).toBe("50.05000000");
+      assertNoNumericMoney(res.body);
     });
   });
 
@@ -243,6 +260,7 @@ describe("Monetary Field Serialization in API Responses", () => {
       expect(p.amount).toBe("10.12345678");
       expect(typeof p.payout).toBe("string");
       expect(p.payout).toBe("15.50000000");
+      assertNoNumericMoney(res.body);
     });
   });
 
@@ -265,6 +283,17 @@ describe("Monetary Field Serialization in API Responses", () => {
     it("null-safe serialization returns null for nullable payout", () => {
       expect(toDecimalString(null)).toBeNull();
       expect(toDecimalString(undefined)).toBeNull();
+    });
+
+    it("serializeMoney never returns a JSON number", () => {
+      expect(serializeMoney(new Decimal("0.1").add("0.2"))).toBe("0.30000000");
+      expect(JSON.stringify({ amount: serializeMoney("10") })).toBe(
+        '{"amount":"10.00000000"}',
+      );
+    });
+
+    it("fails the contract helper when a money field is a number", () => {
+      expect(() => assertNoNumericMoney({ balance: 10.5 })).toThrow(/decimal string/);
     });
 
     it("repeated 0.1 arithmetic stays exact when serialized", () => {

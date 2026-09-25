@@ -20,4 +20,16 @@ describe("rateLimiter.middleware", () => {
     expect(RATE_LIMIT_POLICIES.leaderboardBatch.max).toBeGreaterThan(0);
     expect(RATE_LIMIT_POLICIES.leaderboardBatch.windowMs).toBeGreaterThan(0);
   });
+
+  it("assigns bet endpoint to prediction category", () => {
+    expect(getRateLimitCategory("api/bet")).toBe("prediction");
+  });
+
+  it("keeps demo bet/prediction defaults", () => {
+    expect(RATE_LIMIT_POLICIES.bet.max).toBe(5);
+    expect(RATE_LIMIT_POLICIES.predictionSubmit.max).toBe(10);
+    expect(RATE_LIMIT_POLICIES.bet.max).toBeLessThan(
+      RATE_LIMIT_POLICIES.predictionSubmit.max,
+    );
+  });
 });

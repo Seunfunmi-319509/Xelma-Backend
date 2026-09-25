@@ -45,12 +45,19 @@ export const ROUTE_AUTH_REGISTRY: RouteAuthEntry[] = [
   // Rounds
   { method: "POST", path: "/api/rounds/start", auth: RouteAuthLevel.ADMIN },
   { method: "GET", path: "/api/rounds/:id", auth: RouteAuthLevel.PUBLIC },
-  { method: "GET", path: "/api/rounds/active", auth: RouteAuthLevel.PUBLIC },
+  { method: "POST", path: "/api/rounds/:id/simulate", auth: RouteAuthLevel.ADMIN, notes: "QA-only; gated by ENABLE_SIMULATION (403 when off, even outside production)" },
   { method: "POST", path: "/api/rounds/:id/resolve", auth: RouteAuthLevel.ORACLE },
+
+  // Round-scoped bets (JWT required — wallet bound from token, same
+  // BetService execution path as /api/bets/*)
+  { method: "POST", path: "/api/rounds/:id/bet", auth: RouteAuthLevel.AUTHENTICATED },
+  { method: "POST", path: "/api/rounds/hackathon/up-down/:id/bet", auth: RouteAuthLevel.AUTHENTICATED },
+  { method: "POST", path: "/api/rounds/hackathon/precision/:id/bet", auth: RouteAuthLevel.AUTHENTICATED },
 
   // Bets (JWT required — wallet bound from token)
   { method: "POST", path: "/api/bets/up-down", auth: RouteAuthLevel.AUTHENTICATED },
   { method: "POST", path: "/api/bets/precision", auth: RouteAuthLevel.AUTHENTICATED },
+  { method: "POST", path: "/api/bets/claim", auth: RouteAuthLevel.AUTHENTICATED },
 
   // Predictions
   { method: "POST", path: "/api/predictions/submit", auth: RouteAuthLevel.AUTHENTICATED },
@@ -83,13 +90,14 @@ export const ROUTE_AUTH_REGISTRY: RouteAuthEntry[] = [
   { method: "GET", path: "/api/admin/metrics/rate-limits", auth: RouteAuthLevel.ADMIN },
   { method: "POST", path: "/api/admin/metrics/rate-limits/clear", auth: RouteAuthLevel.ADMIN },
   { method: "GET", path: "/api/admin/cors-diagnostics", auth: RouteAuthLevel.ADMIN },
-  { method: "GET", path: "/api/admin/dead-letter", auth: RouteAuthLevel.ADMIN },
-  { method: "POST", path: "/api/admin/dead-letter/retry-all", auth: RouteAuthLevel.ADMIN },
-  { method: "POST", path: "/api/admin/dead-letter/:id/retry", auth: RouteAuthLevel.ADMIN },
+   { method: "GET", path: "/api/admin/dead-letter", auth: RouteAuthLevel.ADMIN },
+   { method: "POST", path: "/api/admin/dead-letter/retry-all", auth: RouteAuthLevel.ADMIN },
+   { method: "POST", path: "/api/admin/dead-letter/:id/retry", auth: RouteAuthLevel.ADMIN },
+   { method: "GET", path: "/api/admin/bet-audit", auth: RouteAuthLevel.ADMIN },
 
   // System / misc API
-  { method: "GET", path: "/api/prices", auth: RouteAuthLevel.PUBLIC, notes: "Multi-asset price ticker with stale flag" },
-  { method: "GET", path: "/api/price", auth: RouteAuthLevel.PUBLIC },
+  { method: "GET", path: "/api/prices", auth: RouteAuthLevel.PUBLIC, notes: "Multi-asset BTC/ETH/XLM ticker (not an alias of /api/price)" },
+  { method: "GET", path: "/api/price", auth: RouteAuthLevel.PUBLIC, notes: "Production-only XLM oracle (not an alias of /api/prices)" },
   { method: "GET", path: "/api/errors", auth: RouteAuthLevel.PUBLIC },
   { method: "GET", path: "/metrics", auth: RouteAuthLevel.PUBLIC },
   { method: "GET", path: "/health", auth: RouteAuthLevel.PUBLIC },

@@ -1,6 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import config from '../config';
 import logger from '../utils/logger';
+import { createMemoryPrismaClient } from './memory-prisma';
 
 // PrismaClient is attached to the `global` object in development to prevent
 // exhausting your database connection limit.
@@ -23,10 +24,17 @@ export const prisma = (() => {
         deleteMany: async () => ({ count: 0 }) as any,
         findUnique: async () => null as any,
         upsert: async () => null as any,
+        create: async () => null as any,
+        updateMany: async () => ({ count: 0 }) as any,
       },
       $queryRaw: async () => null,
     } as any;
     return mock as PrismaClient;
+  }
+
+  if (config.app.dataStore === 'memory') {
+    logger.info('Prisma client backed by in-memory store (DATA_STORE=memory)');
+    return createMemoryPrismaClient() as unknown as PrismaClient;
   }
 
   return globalForPrisma.prisma || new PrismaClient({
@@ -37,7 +45,7 @@ export const prisma = (() => {
   });
 })();
 
-if (!globalForPrisma.prisma) {
+if (!globalForPrisma.prisma && config.app.dataStore !== 'memory') {
   logger.info("Prisma datasource configured", {
     databaseUrl: sanitizeDatabaseUrl(config.database.url),
     pool: {

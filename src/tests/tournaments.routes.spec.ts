@@ -31,6 +31,7 @@ jest.mock('../middleware/rateLimiter.middleware', () => ({
   chatMessageRateLimiter: (_req: any, _res: any, next: any) => next(),
   adminRoundRateLimiter: (_req: any, _res: any, next: any) => next(),
   oracleResolveRateLimiter: (_req: any, _res: any, next: any) => next(),
+  betRateLimiter: (_req: any, _res: any, next: any) => next(),
   predictionRateLimiter: (_req: any, _res: any, next: any) => next(),
   batchPredictionRateLimiter: (_req: any, _res: any, next: any) => next(),
   batchLeaderboardRateLimiter: (_req: any, _res: any, next: any) => next(),
@@ -58,7 +59,7 @@ describe('Tournaments Routes (Issue #412)', () => {
       expect(res.body.success).toBe(true);
       expect(Array.isArray(res.body.data)).toBe(true);
       expect(res.body.data.length).toBe(3);
-      expect(res.body.pagination.total).toBe(3);
+      expect(res.body.meta.pagination.total).toBe(3);
     });
 
     it('filters by status (case-insensitive)', async () => {
@@ -66,7 +67,7 @@ describe('Tournaments Routes (Issue #412)', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.data.every((t: any) => t.status === 'ACTIVE')).toBe(true);
-      expect(res.body.pagination.total).toBe(1);
+      expect(res.body.meta.pagination.total).toBe(1);
     });
 
     it('returns an empty list for a status with no matches', async () => {
@@ -74,7 +75,7 @@ describe('Tournaments Routes (Issue #412)', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.data).toEqual([]);
-      expect(res.body.pagination.total).toBe(0);
+      expect(res.body.meta.pagination.total).toBe(0);
     });
 
     it('applies limit and offset', async () => {
@@ -82,7 +83,7 @@ describe('Tournaments Routes (Issue #412)', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.data.length).toBe(1);
-      expect(res.body.pagination).toEqual({ limit: 1, offset: 1, total: 3 });
+      expect(res.body.meta.pagination).toEqual({ limit: 1, offset: 1, total: 3 });
     });
 
     it('rejects an invalid (negative) limit', async () => {

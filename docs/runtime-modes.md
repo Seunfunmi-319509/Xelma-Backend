@@ -1,13 +1,20 @@
 # Runtime Modes Matrix
 
 This document is the **single source of truth** for Xelma Backend's runtime
-mode flags. Refer to it when setting up a local environment, debugging unexpected
-endpoint behavior, or choosing the right flags for a deployment profile.
+mode flags — the environment variables that change how endpoints *behave*.
+Refer to it when setting up a local environment, debugging unexpected endpoint
+behavior, or choosing the right flags for a deployment profile.
+
+> **Not to be confused with app feature flags.** Which *routes exist* on each
+> entrypoint is a separate concern, owned by `AppFeatures` in
+> [`src/app-factory.ts`](../src/app-factory.ts) and documented in the
+> "Feature flags" section of [CONTRIBUTING.md](../CONTRIBUTING.md). The env
+> vars below change behaviour; the feature flags change surface area.
 
 > **Startup tip:** The server logs the active mode flags at boot. Look for
-> `Active DATA_MODE=...`, `Bet mode: ...`, and `ROUNDS_MOCK_MODE=...` in the
-> console output. Each log line references this document:
-> `Runtime modes documented at docs/runtime-modes.md`.
+> `Active DATA_MODE=...`, `Bet mode: ...`, `ROUNDS_MOCK_MODE=...`, and
+> `Soroban money-path policy: ...` in the console output. Each log line
+> references this document: `Runtime modes documented at docs/runtime-modes.md`.
 
 ---
 
@@ -20,6 +27,7 @@ endpoint behavior, or choosing the right flags for a deployment profile.
 | `BET_STUB_MODE` | `process.env.BET_STUB_MODE` | `true`, `false` | `true` | `src/services/bet.service.ts` |
 | `ROUNDS_MOCK_MODE` | `config.app.roundsMockMode` | `true`, `false` | `false` | `src/config/index.ts` |
 | `API_ONLY` | `process.env.API_ONLY` | `true`, `false` | `false` | `src/index.ts` |
+| `SOROBAN_FAIL_CLOSED` | `config.soroban.failClosed` | `true`, `false` | `false` | `src/config/index.ts` |
 
 ### DATA_STORE auto-derivation
 
@@ -39,8 +47,8 @@ or from in-memory mock data. This is the highest-level mode switch.
 | Endpoint | `DATA_MODE=live` (default) | `DATA_MODE=mock` |
 |---|---|---|
 | `GET /api/prices` | CoinGecko (30 s cache), falls back to stale cache, then static defaults | Static in-memory array (`mockData.prices`) |
-| `GET /api/rounds` | Drizzle / Postgres (`hackathon_rounds` table) | **Same** — Drizzle is always used for rounds |
-| `GET /api/leaderboard` | Drizzle / Postgres leaderboard table | In-memory seed (`mockLeaderboard`) when `DATA_STORE=memory` |
+| `GET /api/rounds` | Prisma / Postgres (`hackathon_rounds` table) | **Same** — Prisma is always used for rounds |
+| `GET /api/leaderboard` | Prisma / Postgres leaderboard table | In-memory seed (`mockLeaderboard`) when `DATA_STORE=memory` |
 | `GET /api/stats` | Prisma / Postgres aggregation | `MOCK_PLATFORM_STATS` constants (zero-value defaults) |
 | `GET /api/health` | Live Soroban RPC readiness check | Soroban `isReady()` flag only (no RPC call) |
 
@@ -65,6 +73,27 @@ Soroban or just record the intent **locally**.
 > The active mode is logged at startup:
 > `Bet mode: STUB (no on-chain calls)` or `Bet mode: ON-CHAIN (Soroban)`.
 
+### SOROBAN_FAIL_CLOSED
+
+Controls whether **money paths** (bet placement and round resolve) abort when
+Soroban chain verification fails, or silently continue with database-only
+settlement.
+
+| `SOROBAN_FAIL_CLOSED` | Behavior | Use case |
+|---|---|---|
+| `false` (default) | Fail-open: log a warning and proceed with DB-only on Soroban failure | Local demos, hackathons without a live contract |
+| `true` | Fail-closed: abort bet/resolve when chain verification fails | **Production / real stakes — recommended** |
+
+**Affected paths:** UP_DOWN round create, `placeBet`, and `resolveRound` call sites
+in `round.service`, `round.routes`, and `resolution.service`. Policy helper:
+`sorobanService.applyMoneyPathFailure`.
+
+> **Production recommendation:** set `SOROBAN_FAIL_CLOSED=true` so a broken or
+> unavailable Soroban path cannot silently skip on-chain verification.
+
+> The active mode is logged at startup:
+> `Soroban money-path policy: FAIL-CLOSED ...` or `FAIL-OPEN ...`.
+
 ### ROUNDS_MOCK_MODE
 
 Controls whether the **round listing** endpoint skips Soroban and the database
@@ -78,7 +107,9 @@ and returns mock data immediately.
 **Affected endpoints:** `GET /api/rounds/active` (production), `GET /api/rounds` (hackathon)
 
 **Implementation:** `src/services/round.service.ts` (`getRoundsForApi`); checked in both
-`src/routes/rounds.routes.ts` and `src/routes/rounds.ts`.
+`src/routes/rounds.routes.ts` and `src/routes/rounds.ts`. Which of those two
+routers is mounted is decided by the app mode — see
+[CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ---
 
@@ -117,11 +148,12 @@ ROUNDS_MOCK_MODE=false
 SOROBAN_CONTRACT_ID=...
 SOROBAN_ADMIN_SECRET=...
 SOROBAN_ORACLE_SECRET=...
+SOROBAN_FAIL_CLOSED=true
 DATABASE_URL=postgresql://...
 ```
 
 - Live CoinGecko, on-chain bets, real DB.
-- Closest to production.
+- Closest to production; money paths abort if chain verification fails.
 
 ### 4. Hackathon / demo
 
@@ -196,6 +228,7 @@ for your current workflow.
 | `DATA_STORE` | `src/config/index.ts`, `src/repositories/` |
 | `BET_STUB_MODE` | `src/services/bet.service.ts` |
 | `ROUNDS_MOCK_MODE` | `src/config/index.ts`, `src/services/round.service.ts` |
+| `SOROBAN_FAIL_CLOSED` | `src/config/index.ts`, `src/services/soroban.service.ts` |
 | Mock data | `src/data/mockData.ts` |
 
 ---
@@ -206,3 +239,22 @@ for your current workflow.
 - **`.env.hackathon.example`** — Minimal template for hackathon/demo mode (mock data, no DB).
 
 Both files are in the repository root and include these flags with inline comments.
+
+---
+
+## Docker Deployment Profiles & Soroban Bindings
+
+The multi-stage `Dockerfile` packages both full production (with live Soroban contracts and database migrations) and lightweight hackathon/API-only deployment profiles.
+
+### Vendored Bindings & Dependency Resolution
+- The dependency `@tevalabs/xelma-bindings` is declared via `"file:vendor/xelma-bindings"`.
+- The `Dockerfile` explicitly copies `./vendor` in both `deps` and `runner` stages to guarantee offline/container build resolution.
+- `docker/entrypoint.sh` executes `scripts/install-bindings.js --check` when `DATA_MODE=live` or `BET_STUB_MODE=false` before booting the API server.
+
+### Container Profiles
+| Profile | Environment Configuration | Entrypoint Behavior |
+|---|---|---|
+| **Full Production (Live)** | `DATA_MODE=live`, `BET_STUB_MODE=false`, `API_MODE=full` | Verifies Soroban bindings, applies Prisma migrations, and boots full app `dist/index.js`. |
+| **Demo / Hackathon** | `DATA_MODE=mock`, `API_MODE=hackathon`, `RUN_MIGRATIONS=false` | Boots lightweight mock demo server `dist/server.js` without requiring external database or Soroban keys. |
+| **API Only** | `API_ONLY=true`, `BET_STUB_MODE=true` | Boots standard API server without running background schedulers or oracle loops. |
+

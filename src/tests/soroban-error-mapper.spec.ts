@@ -14,6 +14,13 @@ describe("mapSorobanError", () => {
     expect(error.message).toBe("Insufficient funds for contract operation.");
   });
 
+  it("maps 'nothing to claim' to CONTRACT_INVALID_STATE", () => {
+    const error = mapSorobanError("HostError: nothing to claim");
+    expect(error).toBeInstanceOf(BusinessRuleError);
+    expect(error.code).toBe(ErrorCode.CONTRACT_INVALID_STATE);
+    expect(error.message).toBe("No claimable winnings available.");
+  });
+
   it("maps 'invalid state' to CONTRACT_INVALID_STATE BusinessRuleError", () => {
     const error = mapSorobanError("Error 14: invalid state in contract");
     expect(error).toBeInstanceOf(BusinessRuleError);
@@ -26,6 +33,17 @@ describe("mapSorobanError", () => {
     expect(error).toBeInstanceOf(ExternalServiceError);
     expect(error.code).toBe(ErrorCode.EXTERNAL_SERVICE_ERROR);
     expect(error.message).toBe("Contract operation timed out.");
+  });
+
+  it("maps circuit-breaker messages to a safe 503", () => {
+    const error = mapSorobanError(
+      'Circuit breaker "soroban-rpc" is open until 2026-08-23T00:00:00.000Z',
+    );
+    expect(error).toBeInstanceOf(ExternalServiceError);
+    expect(error.code).toBe(ErrorCode.EXTERNAL_SERVICE_ERROR);
+    expect(error.message).toBe(
+      "Contract service temporarily unavailable. Please retry shortly.",
+    );
   });
 
   it("maps unknown errors to generic EXTERNAL_SERVICE_ERROR without leaking details", () => {

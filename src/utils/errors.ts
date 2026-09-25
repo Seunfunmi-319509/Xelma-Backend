@@ -29,6 +29,7 @@ export enum ErrorCode {
   ACTIVE_ROUND_EXISTS = "ACTIVE_ROUND_EXISTS",
   IDEMPOTENCY_KEY_CONFLICT = "IDEMPOTENCY_KEY_CONFLICT",
   CONTRACT_INVALID_STATE = "CONTRACT_INVALID_STATE",
+  TOURNAMENT_INVALID_STATE = "TOURNAMENT_INVALID_STATE",
 }
 
 export interface ErrorDetail {
@@ -92,6 +93,46 @@ export class ConflictError extends AppError {
   }
 }
 
+/**
+ * 409 – a tournament lifecycle request was made out of order (Issue #502).
+ * Distinct from a generic ConflictError so the saga's bad-state rejections are
+ * machine-recognisable and can increment the transition-failure metric.
+ */
+export class TournamentInvalidStateError extends ConflictError {
+  readonly from: string;
+  readonly to: string;
+
+  constructor(from: string, to: string, message?: string) {
+    super(
+      message ?? `Invalid tournament state: cannot ${to} a ${from} tournament.`,
+      ErrorCode.TOURNAMENT_INVALID_STATE,
+    );
+    this.name = "TournamentInvalidStateError";
+    this.from = from;
+    this.to = to;
+  }
+}
+
+/**
+ * 409 – a round lifecycle transition was attempted out of order (e.g.
+ * resolving a round that is not LOCKED). Distinct from a generic
+ * ConflictError so the round state machine's rejections are
+ * machine-recognisable and can increment the transition-failure metric.
+ */
+export class IllegalRoundTransitionError extends ConflictError {
+  readonly from: string;
+  readonly to: string;
+
+  constructor(from: string, to: string, message?: string) {
+    super(
+      message ?? `Illegal round transition: cannot transition a ${from} round to ${to}.`,
+    );
+    this.name = "IllegalRoundTransitionError";
+    this.from = from;
+    this.to = to;
+  }
+}
+
 /** 422 – business-rule violation (request was well-formed but semantically invalid) */
 export class BusinessRuleError extends AppError {
   constructor(message: string, code: ErrorCode | string = ErrorCode.BUSINESS_RULE_VIOLATION) {
@@ -103,6 +144,23 @@ export class BusinessRuleError extends AppError {
 export class ExternalServiceError extends AppError {
   constructor(message: string, code: ErrorCode | string = ErrorCode.EXTERNAL_SERVICE_ERROR) {
     super(message, 503, code);
+  }
+}
+
+/**
+ * 503 – in-flight cap exceeded on a money/RPC path.
+ * Distinct from a generic upstream failure so the error handler can set Retry-After.
+ */
+export class BackpressureError extends ExternalServiceError {
+  readonly retryAfterSeconds: number;
+
+  constructor(
+    message = "Too many in-flight money-path operations. Please retry shortly.",
+    retryAfterSeconds = 1,
+  ) {
+    super(message, ErrorCode.EXTERNAL_SERVICE_ERROR);
+    this.name = "BackpressureError";
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 }
 
@@ -292,6 +350,14 @@ export const ERROR_CATALOG: readonly ErrorCatalogEntry[] = [
     description:
       "Contract operation rejected due to invalid state on the blockchain.",
   },
+  {
+    code: ErrorCode.TOURNAMENT_INVALID_STATE,
+    status: 409,
+    errorClass: "TournamentInvalidStateError",
+    description:
+      "Tournament lifecycle request made out of order (e.g. locking a tournament " +
+      "that is not UPCOMING, or settling one that never locked).",
+  },
 ];
 
 /**
@@ -308,6 +374,17 @@ export function mapSorobanError(errorMsg: string | undefined): AppError {
     );
   }
 
+  if (
+    msg.includes("no pending") ||
+    msg.includes("nothing to claim") ||
+    msg.includes("already claimed")
+  ) {
+    return new BusinessRuleError(
+      "No claimable winnings available.",
+      ErrorCode.CONTRACT_INVALID_STATE
+    );
+  }
+
   if (msg.includes("invalid state")) {
     return new BusinessRuleError(
       "Contract operation rejected due to invalid state.",
@@ -318,6 +395,13 @@ export function mapSorobanError(errorMsg: string | undefined): AppError {
   if (msg.includes("timeout")) {
     return new ExternalServiceError(
       "Contract operation timed out.",
+      ErrorCode.EXTERNAL_SERVICE_ERROR
+    );
+  }
+
+  if (msg.includes("circuit breaker")) {
+    return new ExternalServiceError(
+      "Contract service temporarily unavailable. Please retry shortly.",
       ErrorCode.EXTERNAL_SERVICE_ERROR
     );
   }

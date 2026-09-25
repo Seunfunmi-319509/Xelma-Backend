@@ -14,7 +14,9 @@ import {
   ConflictError,
   BusinessRuleError,
   ExternalServiceError,
+  BackpressureError,
 } from "../utils/errors";
+import { CircuitBreakerOpenError } from "../utils/circuit-breaker";
 import { errorHandler } from "../middleware/errorHandler.middleware";
 import { requestIdMiddleware } from "../middleware/requestId.middleware";
 
@@ -283,6 +285,33 @@ describe("errorHandler Prisma mapping", () => {
     });
     expect(known).toBeInstanceOf(PrismaClientKnownRequestError);
     expect(validation).toBeInstanceOf(PrismaClientValidationError);
+  });
+});
+
+describe("errorHandler backpressure mapping (#500)", () => {
+  it("maps CircuitBreakerOpenError to 503 with Retry-After", async () => {
+    const nextAttemptAt = new Date(Date.now() + 15_000);
+    const app = makeApp((_req, _res, next) =>
+      next(new CircuitBreakerOpenError("soroban-rpc", nextAttemptAt)),
+    );
+
+    const res = await request(app).get("/test");
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe("EXTERNAL_SERVICE_ERROR");
+    expect(res.headers["retry-after"]).toBeDefined();
+    expect(res.body.retryAfter).toBeGreaterThan(0);
+  });
+
+  it("maps BackpressureError to 503 with Retry-After", async () => {
+    const app = makeApp((_req, _res, next) =>
+      next(new BackpressureError("too many in flight", 2)),
+    );
+
+    const res = await request(app).get("/test");
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe("EXTERNAL_SERVICE_ERROR");
+    expect(res.headers["retry-after"]).toBe("2");
+    expect(res.body.retryAfter).toBe(2);
   });
 });
 

@@ -11,6 +11,7 @@ export const RATE_LIMIT_ENDPOINT_CATEGORIES: Record<string, RateLimitCategory> =
   "chat/message": "chat",
   "prediction/submit": "prediction",
   "prediction/batch-submit": "prediction",
+  "api/bet": "prediction",
   "admin/round-create": "admin",
   "oracle/round-resolve": "oracle",
   "leaderboard/batch": "other",

@@ -20,10 +20,10 @@ Connections use the standard Socket.IO client library against the root namespace
 
 ```typescript
 import { io } from "socket.io-client";
-import type { TypedClientSocket } from "../../src/types/socket-events";
+// types are co-located with src/, so the relative path from src/docs/ is ../types/socket-events
+import type { TypedClientSocket } from "../types/socket-events";
 
 const socket: TypedClientSocket = io("https://api.tevalabs.com", {
-const socket = io("https://api.tevalabs.com", {
   auth: {
     token: "YOUR_JWT_ACCESS_TOKEN",
   },
@@ -67,10 +67,15 @@ interface AuthErrorPayload {
 ```
 
 **Client flow:**
-1. Listen for `auth:error` events
-2. On `code === "AUTH_TOKEN_EXPIRED"`: call the HTTP token-refresh endpoint
-3. Reconnect with the new token in `socket.handshake.auth.token`
-4. Re-join rooms (e.g. `join:round`, `join:chat`) after reconnect
+1. Listen for `auth:error` events.
+2. On `code === "AUTH_TOKEN_EXPIRED"`: call the HTTP token refresh endpoint `POST /api/auth/refresh`:
+   ```bash
+   curl -X POST "$API_BASE_URL/api/auth/refresh" \
+     -H "Authorization: Bearer YOUR_EXPIRED_JWT"
+   ```
+   Or send the token in the request body `{ "token": "YOUR_EXPIRED_JWT" }`.
+3. Reconnect with the new token returned in `response.data.token` set as `socket.handshake.auth.token`.
+4. Re-join rooms (e.g. `join:round`, `join:chat`) after reconnect without requiring a full wallet re-authentication challenge.
 
 ### 4. Reconnect Continuity
 
@@ -238,7 +243,7 @@ Import the typed client socket for compile-time safety in frontend projects:
 
 ```typescript
 import { io } from "socket.io-client";
-import type { TypedClientSocket } from "@xelma/backend/types/socket-events";
+import type { TypedClientSocket } from "xelma-backend/types/socket-events";
 
 const socket: TypedClientSocket = io("https://api.tevalabs.com", {
   auth: { token: "YOUR_JWT" },
@@ -253,9 +258,6 @@ socket.emit("join:round", { roundId: "abc-123" });
 ```
 
 See the full type definitions in [`src/types/socket-events.ts`](../types/socket-events.ts).
-  reconnectionDelay: 1000
-});
-```
 
 Join the `round` room after connect (via your client's room-join handshake) to receive round and bet broadcasts.
 

@@ -7,9 +7,17 @@ import { unifiedPaginationSchema, UnifiedPaginationParams, encodeCursor } from "
 import { NotFoundError } from "../utils/errors";
 import { validateStellarAddressParam } from "../utils/stellar-address.util";
 import sorobanService from "../services/soroban.service";
-import { toDecimalString } from "../utils/decimal.util";
+import { serializeMoney } from "../utils/decimal.util";
+import {
+  serializePrediction,
+  serializeTransaction,
+  serializeUserBalance,
+  serializeUserStats,
+} from "../serializers/monetary.serializer";
 import config from "../config";
 import { getMockBetHistory } from "../data/mockData";
+import { sendSuccess, sendError } from "../utils/response";
+import { computeXp, computeRankTitle } from "../utils/user-rank.util";
 
 const router = Router();
 
@@ -52,13 +60,10 @@ router.get(
         preferences: user.preferences,
         streak: user.streak,
         lastLoginAt: user.lastLoginAt,
-        balance: toDecimalString(user.virtualBalance),
+        balance: serializeMoney(user.virtualBalance),
       };
 
-      return res.json({
-        success: true,
-        profile,
-      });
+      return sendSuccess(res, { profile });
     } catch (error) {
       next(error);
     }
@@ -83,10 +88,7 @@ router.get(
 
       if (!user) return next(new NotFoundError("User not found"));
 
-      return res.json({
-        success: true,
-        balance: toDecimalString(user.virtualBalance),
-      });
+      return sendSuccess(res, serializeUserBalance({ balance: user.virtualBalance }));
     } catch (error) {
       next(error);
     }
@@ -105,57 +107,35 @@ router.get("/stats", authenticateUser, (async (req: AuthenticatedRequest, res: R
       where: { userId },
     });
 
-    return res.json({
-      success: true,
+    return sendSuccess(res, {
       stats: stats
-        ? {
+        ? serializeUserStats({
             totalPredictions: stats.totalPredictions,
             correctPredictions: stats.correctPredictions,
-            totalEarnings: toDecimalString(stats.totalEarnings),
+            totalEarnings: stats.totalEarnings,
             upDownWins: stats.upDownWins,
             upDownLosses: stats.upDownLosses,
-            upDownEarnings: toDecimalString(stats.upDownEarnings),
+            upDownEarnings: stats.upDownEarnings,
             legendsWins: stats.legendsWins,
             legendsLosses: stats.legendsLosses,
-            legendsEarnings: toDecimalString(stats.legendsEarnings),
-          }
-        : {
+            legendsEarnings: stats.legendsEarnings,
+          })
+        : serializeUserStats({
             totalPredictions: 0,
             correctPredictions: 0,
-            totalEarnings: "0",
+            totalEarnings: 0,
             upDownWins: 0,
             upDownLosses: 0,
-            upDownEarnings: "0",
+            upDownEarnings: 0,
             legendsWins: 0,
             legendsLosses: 0,
-            legendsEarnings: "0",
-          },
+            legendsEarnings: 0,
+          }),
     });
   } catch (error) {
     next(error);
   }
 }) as any);
-
-/**
- * Computes an XP score from on-chain user stats.
- * XP = totalWins × 100 + bestStreak × 50
- */
-function computeXp(totalWins: number, bestStreak: number): number {
-  return totalWins * 100 + bestStreak * 50;
-}
-
-/**
- * Derives a rank title from XP.
- * Thresholds match hackathon profile expectations.
- */
-function computeRankTitle(xp: number): string {
-  if (xp >= 10000) return "Diamond";
-  if (xp >= 5000) return "Platinum";
-  if (xp >= 3000) return "Gold";
-  if (xp >= 1500) return "Silver";
-  if (xp >= 500) return "Bronze";
-  return "Rookie";
-}
 
 /**
  * GET /api/user/:address/stats
@@ -179,18 +159,17 @@ router.get(
       ]);
 
       if (!contractStats) {
-        return res.json({
-          success: true,
+        return sendSuccess(res, {
           stats: {
             totalWins: 0,
             totalLosses: 0,
             bestStreak: 0,
             currentStreak: 0,
-            pendingWinnings: "0",
-            isRegistered: false,
-          },
-          profile: {
-            balance: 0,
+          pendingWinnings: serializeMoney(0),
+          isRegistered: false,
+        },
+        profile: {
+          balance: serializeMoney(0),
             xp: 0,
             rankTitle: "Rookie",
           },
@@ -199,18 +178,17 @@ router.get(
 
       const xp = computeXp(contractStats.total_wins, contractStats.best_streak);
 
-      return res.json({
-        success: true,
+      return sendSuccess(res, {
         stats: {
           totalWins: contractStats.total_wins,
           totalLosses: contractStats.total_losses,
           bestStreak: contractStats.best_streak,
           currentStreak: contractStats.current_streak,
-          pendingWinnings: pendingWinnings.toString(),
+          pendingWinnings: serializeMoney(pendingWinnings),
           isRegistered: contractStats.total_wins > 0 || contractStats.total_losses > 0,
         },
         profile: {
-          balance,
+          balance: serializeMoney(balance),
           xp,
           rankTitle: computeRankTitle(xp),
         },
@@ -249,10 +227,7 @@ router.patch(
         },
       });
 
-      return res.json({
-        success: true,
-        profile: updatedUser,
-      });
+      return sendSuccess(res, { profile: updatedUser });
     } catch (error) {
       next(error);
     }
@@ -284,14 +259,11 @@ router.get(
         prisma.transaction.count({ where: { userId } }),
       ]);
 
-      const serializedTransactions = transactions.map((tx: any) => ({
-        ...tx,
-        amount: toDecimalString(tx.amount),
-      }));
+      const serializedTransactions = transactions.map((tx: Record<string, unknown>) =>
+        serializeTransaction(tx),
+      );
 
-      return res.json({
-        success: true,
-        data: serializedTransactions,
+      return sendSuccess(res, serializedTransactions, {
         pagination: {
           page,
           limit,
@@ -348,13 +320,13 @@ router.get(
       // Unknown address → empty response (not a 404: the address may exist on-chain
       // but have never placed a bet, and callers should not need to handle errors).
       if (!user) {
-        return res.json({
-          success: true,
-          data: [],
-          ...(cursor
+        return sendSuccess(
+          res,
+          [],
+          cursor
             ? { nextCursor: null }
-            : { pagination: { limit, offset, total: 0, totalPages: 0 } }),
-        });
+            : { pagination: { limit, offset, total: 0, totalPages: 0 } },
+        );
       }
 
       // ── Shared include shape ────────────────────────────────────────────────
@@ -381,15 +353,17 @@ router.get(
           cursorDate = new Date(Buffer.from(cursor, "base64url").toString("utf8"));
           if (isNaN(cursorDate.getTime())) throw new Error("invalid date");
         } catch {
-          return res.status(400).json({
-            success: false,
-            error: "Invalid cursor. Use the nextCursor value returned by a previous response.",
-          });
+          return sendError(
+            res,
+            "Invalid cursor. Use the nextCursor value returned by a previous response.",
+            400,
+          );
         }
 
         const predictions = await prisma.prediction.findMany({
           where: {
             userId: user.id,
+            chainStatus: { in: ['CONFIRMED', 'NOT_REQUIRED'] },
             createdAt: { lt: cursorDate },
           },
           orderBy: { createdAt: "desc" },
@@ -405,28 +379,30 @@ router.get(
           ? Buffer.from(page[page.length - 1].createdAt.toISOString()).toString("base64url")
           : null;
 
-        return res.json({
-          success: true,
-          data: page.map(mapPrediction),
-          nextCursor,
-        });
+        return sendSuccess(res, page.map(mapPrediction), { nextCursor });
       }
 
       // ── Offset-based path (backward-compatible) ───────────────────────────
       const [predictions, total] = await prisma.$transaction([
         prisma.prediction.findMany({
-          where: { userId: user.id },
+          where: {
+            userId: user.id,
+            chainStatus: { in: ['CONFIRMED', 'NOT_REQUIRED'] },
+          },
           orderBy: { createdAt: "desc" },
           take: limit,
           skip: offset,
           include: { round: roundSelect },
         }),
-        prisma.prediction.count({ where: { userId: user.id } }),
+        prisma.prediction.count({
+          where: {
+            userId: user.id,
+            chainStatus: { in: ['CONFIRMED', 'NOT_REQUIRED'] },
+          },
+        }),
       ]);
 
-      return res.json({
-        success: true,
-        data: predictions.map(mapPrediction),
+      return sendSuccess(res, predictions.map(mapPrediction), {
         pagination: {
           limit,
           offset,
@@ -442,18 +418,29 @@ router.get(
 
 /** Maps a raw Prisma prediction + round to the public API shape. */
 function mapPrediction(p: any) {
-  return {
+  let result: string;
+  if (p.chainStatus === 'FAILED') {
+    result = 'FAILED';
+  } else if (p.won === null) {
+    result = 'PENDING';
+  } else if (p.won) {
+    result = 'WIN';
+  } else {
+    result = 'LOSS';
+  }
+
+  return serializePrediction({
     roundId: p.roundId,
     asset: "XLM",
     mode: p.round.mode,
-    amount: toDecimalString(p.amount),
+    amount: p.amount,
     side: p.side,
     predictedPrice: p.priceRange,
-    result: p.won === null ? "PENDING" : p.won ? "WIN" : "LOSS",
-    payout: p.payout !== null && p.payout !== undefined ? toDecimalString(p.payout) : null,
+    result,
+    payout: p.payout,
     timestamp: p.createdAt,
     roundStatus: p.round.status,
-  };
+  });
 }
 
 /**
@@ -471,13 +458,13 @@ function handleMockHistory(
   const all = getMockBetHistory(address);
 
   if (!all.length) {
-    res.json({
-      success: true,
-      data: [],
-      ...(cursor
+    sendSuccess(
+      res,
+      [],
+      cursor
         ? { nextCursor: null }
-        : { pagination: { limit, offset, total: 0, totalPages: 0 } }),
-    });
+        : { pagination: { limit, offset, total: 0, totalPages: 0 } },
+    );
     return;
   }
 
@@ -488,10 +475,11 @@ function handleMockHistory(
       cursorDate = new Date(Buffer.from(cursor, "base64url").toString("utf8"));
       if (isNaN(cursorDate.getTime())) throw new Error("invalid date");
     } catch {
-      res.status(400).json({
-        success: false,
-        error: "Invalid cursor. Use the nextCursor value returned by a previous response.",
-      });
+      sendError(
+        res,
+        "Invalid cursor. Use the nextCursor value returned by a previous response.",
+        400,
+      );
       return;
     }
 
@@ -502,7 +490,7 @@ function handleMockHistory(
       ? encodeCursor(page[page.length - 1].timestamp)
       : null;
 
-    res.json({ success: true, data: page, nextCursor });
+    sendSuccess(res, page, { nextCursor });
     return;
   }
 
@@ -510,9 +498,7 @@ function handleMockHistory(
   const page = all.slice(offset, offset + limit);
   const total = all.length;
 
-  res.json({
-    success: true,
-    data: page,
+  sendSuccess(res, page, {
     pagination: {
       limit,
       offset,
@@ -553,8 +539,7 @@ router.get(
         return next(new NotFoundError("User not found"));
       }
 
-      return res.json({
-        success: true,
+      return sendSuccess(res, {
         profile: {
           walletAddress: user.walletAddress,
           nickname: user.nickname,

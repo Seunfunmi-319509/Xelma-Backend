@@ -14,7 +14,7 @@ import {
   LeaderboardCursorResponse,
   LeaderboardResponse,
 } from "../types/leaderboard.types";
-import { toDecimal, toNumber, toDecimalString } from "../utils/decimal.util";
+import { toDecimal, toNumber, serializeMoney } from "../utils/decimal.util";
 import {
   buildCursorMeta,
   buildOffsetMeta,
@@ -82,14 +82,14 @@ function buildEntry(
     rank,
     userId: stat.user.id,
     walletAddress: maskWalletAddress(stat.user.walletAddress),
-    totalEarnings: toDecimalString(stat.totalEarnings) || '0',
+    totalEarnings: serializeMoney(stat.totalEarnings),
     totalPredictions: stat.totalPredictions,
     accuracy: calculateAccuracy(stat.correctPredictions, stat.totalPredictions),
     modeStats: {
       upDown: {
         wins: stat.upDownWins,
         losses: stat.upDownLosses,
-        earnings: toDecimalString(stat.upDownEarnings) || '0',
+        earnings: serializeMoney(stat.upDownEarnings),
         accuracy: calculateAccuracy(
           stat.upDownWins,
           stat.upDownWins + stat.upDownLosses,
@@ -98,7 +98,7 @@ function buildEntry(
       legends: {
         wins: stat.legendsWins,
         losses: stat.legendsLosses,
-        earnings: toDecimalString(stat.legendsEarnings) || '0',
+        earnings: serializeMoney(stat.legendsEarnings),
         accuracy: calculateAccuracy(
           stat.legendsWins,
           stat.legendsWins + stat.legendsLosses,
@@ -412,6 +412,9 @@ export async function updateUserStatsForRound(roundId: string): Promise<void> {
     where: { id: roundId },
     include: {
       predictions: {
+        where: {
+          chainStatus: { in: ['CONFIRMED', 'NOT_REQUIRED'] },
+        },
         include: { user: true },
       },
     },

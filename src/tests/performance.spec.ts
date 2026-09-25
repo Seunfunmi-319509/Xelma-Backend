@@ -21,6 +21,7 @@ import {
   measureWebSocketFanout,
   runConcurrentLoad,
 } from "./load-test.harness";
+import { betStore } from "../data/bet-store";
 
 // Mock external services to keep performance tests focused on backend logic
 jest.mock("../services/stellar.service", () => ({
@@ -30,16 +31,28 @@ jest.mock("../services/stellar.service", () => ({
 
 jest.mock("../services/soroban.service", () => ({
   __esModule: true,
-  default: {
-    placeBet: jest.fn().mockResolvedValue(undefined),
-    ensureInitialized: jest.fn(),
-  },
+    default: {
+      placeBet: jest.fn().mockResolvedValue(undefined),
+      ensureInitialized: jest.fn(),
+      getActiveRound: jest.fn().mockResolvedValue(null),
+    },
 }));
 
-jest.mock("../lib/redis", () => ({
-  invalidateNamespace: jest.fn().mockResolvedValue(undefined),
-  getCacheMetrics: jest.fn().mockReturnValue({ enabled: false }),
-}));
+jest.mock("../lib/redis", () => {
+  const fakeLockClient = {
+    set: jest.fn().mockResolvedValue("OK"),
+    eval: jest.fn().mockResolvedValue(1),
+  };
+  return {
+    invalidateNamespace: jest.fn().mockResolvedValue(undefined),
+    invalidateLeaderboardSortedSet: jest.fn().mockResolvedValue(undefined),
+    getCacheMetrics: jest.fn().mockReturnValue({ enabled: false }),
+    // Fail-closed distributed idempotency lock (Issue #493): the load test
+    // keeps a fake client so it stays a pure throughput harness without a
+    // live Redis dependency.
+    getConnectedRedisClient: jest.fn().mockResolvedValue(fakeLockClient),
+  };
+});
 
 // Mock rate limiters to avoid 429 during load tests
 jest.mock("../middleware/rateLimiter.middleware", () => ({
@@ -52,6 +65,7 @@ jest.mock("../middleware/rateLimiter.middleware", () => ({
   batchLeaderboardRateLimiter: (_req: any, _res: any, next: any) => next(),
   adminRoundRateLimiter: (_req: any, _res: any, next: any) => next(),
   oracleResolveRateLimiter: (_req: any, _res: any, next: any) => next(),
+  betRateLimiter: (_req: any, _res: any, next: any) => next(),
 }));
 
 // Mock Prisma to keep tests lightweight and avoid DB dependency
@@ -76,6 +90,7 @@ jest.mock("../lib/prisma", () => ({
     },
     round: {
       findMany: jest.fn().mockResolvedValue([]),
+      findFirst: jest.fn().mockResolvedValue(null),
       findUnique: jest.fn().mockResolvedValue({
         id: "some-uuid",
         status: "ACTIVE",
@@ -85,6 +100,33 @@ jest.mock("../lib/prisma", () => ({
     prediction: {
       findUnique: jest.fn().mockResolvedValue(null),
     },
+    idempotencyKey: {
+      findUnique: jest.fn().mockResolvedValue(null),
+      create: jest.fn().mockResolvedValue({ id: "idem-1" }),
+      upsert: jest.fn().mockResolvedValue({ id: "idem-1" }),
+      deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
+      updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+    },
+    mockRound: {
+      findMany: jest.fn().mockResolvedValue([
+        {
+          id: "btc-updown-live",
+          asset: "BTC",
+          mode: "updown",
+          status: "live",
+          startPrice: 60000,
+          poolUp: 0,
+          poolDown: 0,
+          closesAt: new Date(Date.now() + 300_000).toISOString(),
+        },
+      ]),
+    },
+    mockLeaderboard: {
+      findMany: jest.fn().mockResolvedValue([]),
+    },
+    mockPlatformStat: {
+      findFirst: jest.fn().mockResolvedValue(null),
+    },
     $transaction: jest.fn((cb) =>
       cb({
         round: {
@@ -92,8 +134,28 @@ jest.mock("../lib/prisma", () => ({
             id: "some-uuid",
             status: "ACTIVE",
             mode: "UP_DOWN",
+            startTime: new Date(),
+            endTime: new Date(Date.now() + 60_000),
+            startPrice: 0.1,
+            endPrice: null,
+            poolUp: 0,
+            poolDown: 0,
+            priceRanges: [],
+            resolvedAt: null,
           }),
-          update: jest.fn().mockResolvedValue({}),
+          update: jest.fn().mockResolvedValue({
+            id: "some-uuid",
+            status: "ACTIVE",
+            mode: "UP_DOWN",
+            startTime: new Date(),
+            endTime: new Date(Date.now() + 60_000),
+            startPrice: 0.1,
+            endPrice: null,
+            poolUp: 10,
+            poolDown: 0,
+            priceRanges: [],
+            resolvedAt: null,
+          }),
         },
         prediction: {
           findUnique: jest.fn().mockResolvedValue(null),
@@ -121,6 +183,9 @@ jest.mock("../lib/prisma", () => ({
             virtualBalance: 990,
           }),
         },
+        outboxEvent: {
+          create: jest.fn().mockResolvedValue({ id: "outbox-1" }),
+        },
       })
     ),
     $disconnect: jest.fn().mockResolvedValue(undefined),
@@ -130,6 +195,7 @@ jest.mock("../lib/prisma", () => ({
 const LOAD_CONFIG = getLoadTestConfig();
 const WALLET =
   "GB3JDWCQWJ5VQJ3H6E6GQGZVFKU4ZQXGJ6S4Q2W7S6ZJ5R2YQH2B7ZQX";
+const BET_WALLET = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
 
 function waitForConnect(socket: Socket, timeoutMs = 5000): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -199,9 +265,9 @@ describe("Performance Baseline Checks (#152)", () => {
     expect(latency).toBeLessThan(LOAD_CONFIG.baseline.challengeLatencyMs);
   });
 
-  it(`GET /api/rounds/active should respond within ${LOAD_CONFIG.baseline.activeRoundsLatencyMs}ms`, async () => {
-    const latency = await measureLatency("get", "/api/rounds/active");
-    console.log(`[PERF] /api/rounds/active latency: ${latency}ms`);
+  it(`GET /api/rounds should respond within ${LOAD_CONFIG.baseline.activeRoundsLatencyMs}ms`, async () => {
+    const latency = await measureLatency("get", "/api/rounds");
+    console.log(`[PERF] /api/rounds latency: ${latency}ms`);
     expect(latency).toBeLessThan(LOAD_CONFIG.baseline.activeRoundsLatencyMs);
   });
 
@@ -259,6 +325,142 @@ describe("Load Test Harness — Prediction Throughput (#21)", () => {
     console.log(formatLoadTestReport("prediction throughput", result));
 
     expect(result.errorRate).toBeLessThanOrEqual(LOAD_CONFIG.prediction.maxErrorRate);
+    expect(result.throughputRps).toBeGreaterThanOrEqual(minThroughputRps);
+    expect(result.latencyMs.p95).toBeLessThanOrEqual(maxP95LatencyMs);
+  });
+});
+
+describe("Load Test Harness — Authenticated bets (#500)", () => {
+  let app: Express;
+  let betToken: string;
+  const previousStubMode = process.env.BET_STUB_MODE;
+
+  beforeAll(() => {
+    process.env.BET_STUB_MODE = "true";
+    app = createApp();
+    betToken = generateToken("perf-user-id", BET_WALLET, UserRole.USER);
+  });
+
+  afterAll(() => {
+    process.env.BET_STUB_MODE = previousStubMode;
+  });
+
+  it("sustains concurrent authenticated UP/DOWN bets with measurable p95", async () => {
+    const { concurrency, iterations, minThroughputRps, maxP95LatencyMs, maxErrorRate } =
+      LOAD_CONFIG.authBet;
+
+    const result = await runConcurrentLoad({
+      concurrency,
+      iterations,
+      task: async (index) => {
+        const startedAt = Date.now();
+        const response = await request(app)
+          .post("/api/bets/up-down")
+          .set("Authorization", `Bearer ${betToken}`)
+          .send({
+            address: BET_WALLET,
+            amount: 1 + (index % 5),
+            side: index % 2 === 0 ? "UP" : "DOWN",
+          });
+
+        return {
+          success: response.status === 200,
+          latencyMs: Date.now() - startedAt,
+          statusCode: response.status,
+        };
+      },
+    });
+
+    console.log(formatLoadTestReport("auth bet throughput", result));
+
+    expect(result.errorRate).toBeLessThanOrEqual(maxErrorRate);
+    expect(result.throughputRps).toBeGreaterThanOrEqual(minThroughputRps);
+    expect(result.latencyMs.p95).toBeLessThanOrEqual(maxP95LatencyMs);
+  });
+});
+
+describe("Load Test Harness — Duplicate idempotency (#500)", () => {
+  let app: Express;
+  let betToken: string;
+  const previousStubMode = process.env.BET_STUB_MODE;
+
+  beforeAll(() => {
+    process.env.BET_STUB_MODE = "true";
+    app = createApp();
+    betToken = generateToken("perf-user-id", BET_WALLET, UserRole.USER);
+  });
+
+  afterAll(() => {
+    process.env.BET_STUB_MODE = previousStubMode;
+  });
+
+  it("replays the same Idempotency-Key without creating extra bets", async () => {
+    const { concurrency, iterations, maxP95LatencyMs, maxErrorRate } =
+      LOAD_CONFIG.idempotency;
+    const idempotencyKey = `load-idempotency-${Date.now()}`;
+    const beforeCount = betStore.getBets({ address: BET_WALLET }).length;
+
+    const result = await runConcurrentLoad({
+      concurrency,
+      iterations,
+      task: async () => {
+        const startedAt = Date.now();
+        const response = await request(app)
+          .post("/api/bets/up-down")
+          .set("Authorization", `Bearer ${betToken}`)
+          .set("Idempotency-Key", idempotencyKey)
+          .send({
+            address: BET_WALLET,
+            amount: 10,
+            side: "UP",
+          });
+
+        return {
+          success: response.status === 200 || response.status === 409,
+          latencyMs: Date.now() - startedAt,
+          statusCode: response.status,
+        };
+      },
+    });
+
+    console.log(formatLoadTestReport("duplicate idempotency", result));
+
+    const created = betStore.getBets({ address: BET_WALLET }).length - beforeCount;
+    expect(created).toBe(1);
+    expect(result.errorRate).toBeLessThanOrEqual(maxErrorRate);
+    expect(result.latencyMs.p95).toBeLessThanOrEqual(maxP95LatencyMs);
+  });
+});
+
+describe("Load Test Harness — Read rounds (#500)", () => {
+  let app: Express;
+
+  beforeAll(() => {
+    app = createApp();
+  });
+
+  it("sustains concurrent GET /api/rounds with measurable p95", async () => {
+    const { concurrency, iterations, minThroughputRps, maxP95LatencyMs, maxErrorRate } =
+      LOAD_CONFIG.readRounds;
+
+    const result = await runConcurrentLoad({
+      concurrency,
+      iterations,
+      task: async () => {
+        const startedAt = Date.now();
+        const response = await request(app).get("/api/rounds");
+
+        return {
+          success: response.status === 200,
+          latencyMs: Date.now() - startedAt,
+          statusCode: response.status,
+        };
+      },
+    });
+
+    console.log(formatLoadTestReport("read rounds throughput", result));
+
+    expect(result.errorRate).toBeLessThanOrEqual(maxErrorRate);
     expect(result.throughputRps).toBeGreaterThanOrEqual(minThroughputRps);
     expect(result.latencyMs.p95).toBeLessThanOrEqual(maxP95LatencyMs);
   });

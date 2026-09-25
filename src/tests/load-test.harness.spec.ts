@@ -1,7 +1,9 @@
 import { describe, it, expect } from "@jest/globals";
 import {
   computeLatencyStats,
+  countStatusCodes,
   getLoadTestConfig,
+  isControlledOverloadStatus,
   percentile,
   runConcurrentLoad,
   summarizeLoadTest,
@@ -43,6 +45,20 @@ describe("load-test.harness (#21)", () => {
       expect(summary.throughputRps).toBe(3);
       expect(summary.latencyMs.p50).toBe(20);
     });
+
+    it("counts status codes and treats 429/503 as controlled overload", () => {
+      expect(
+        countStatusCodes([
+          { success: true, latencyMs: 1, statusCode: 200 },
+          { success: true, latencyMs: 1, statusCode: 429 },
+          { success: true, latencyMs: 1, statusCode: 429 },
+        ]),
+      ).toEqual({ 200: 1, 429: 2 });
+      expect(isControlledOverloadStatus(200)).toBe(true);
+      expect(isControlledOverloadStatus(429)).toBe(true);
+      expect(isControlledOverloadStatus(503)).toBe(true);
+      expect(isControlledOverloadStatus(500)).toBe(false);
+    });
   });
 
   describe("runConcurrentLoad", () => {
@@ -73,6 +89,9 @@ describe("load-test.harness (#21)", () => {
       const config = getLoadTestConfig();
       expect(config.prediction.concurrency).toBeGreaterThan(0);
       expect(config.prediction.iterations).toBeGreaterThan(0);
+      expect(config.authBet.concurrency).toBeGreaterThan(0);
+      expect(config.readRounds.iterations).toBeGreaterThan(0);
+      expect(config.overload.betBurst).toBeGreaterThan(5);
       expect(config.websocket.clientCount).toBeGreaterThan(0);
       expect(config.baseline.challengeLatencyMs).toBe(200);
     });

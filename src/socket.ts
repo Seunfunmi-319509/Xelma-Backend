@@ -8,6 +8,7 @@ import chatService from './services/chat.service';
 import multiplayerSessionService from './services/multiplayer-session.service';
 import logger from './utils/logger';
 import { initializeSocketAdapter } from './utils/socket-adapter';
+import config from './config';
 import {
    setSocketConnectionsActive,
    websocketConnectionEventsTotal,
@@ -31,38 +32,17 @@ let activeStaleInterval: NodeJS.Timeout | null = null;
 let activeTokenExpiryInterval: NodeJS.Timeout | null = null;
 let ioInstance: SocketIOServer | null = null;
 
-const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+export { getCorsOrigins } from './utils/cors';
+import { getCorsOrigins } from './utils/cors';
 
-export function getCorsOrigins(): string | string[] {
-   const clientUrl = process.env.CLIENT_URL;
-
-   if (IS_PRODUCTION) {
-      if (!clientUrl) {
-         throw new Error(
-            'CLIENT_URL environment variable is required in production. ' +
-               'Socket.IO CORS cannot use wildcard origin (*) with credentials enabled.'
-         );
-      }
-      const additionalOrigins = process.env.ALLOWED_ORIGINS;
-      if (additionalOrigins) {
-         return [clientUrl, ...additionalOrigins.split(',').map(o => o.trim())];
-      }
-      return clientUrl;
-   }
-
-   if (!clientUrl) {
-      logger.warn(
-         'CLIENT_URL not set; allowing all origins for development. ' +
-            'Set CLIENT_URL to restrict origins.'
-      );
-      return '*';
-   }
-
-   const additionalOrigins = process.env.ALLOWED_ORIGINS;
-   if (additionalOrigins) {
-      return [clientUrl, ...additionalOrigins.split(',').map(o => o.trim())];
-   }
-   return clientUrl;
+function isAuthorizedPrivateRoomJoin(
+   socket: AuthenticatedSocket,
+   room: string,
+): boolean {
+   if (!room.startsWith('user:')) return true;
+   if (!socket.userId) return false;
+   const expectedRoom = `user:${socket.userId}`;
+   return room === expectedRoom;
 }
 
 // Extended socket with walletAddress attached directly alongside SocketData
@@ -375,6 +355,18 @@ export async function initializeSocket(
          }
          const decoded = verifyResult.payload;
 
+         if (config.app.socketDemoMode) {
+            socket.userId = decoded.userId;
+            socket.walletAddress = decoded.walletAddress;
+            if ((decoded as any).exp) {
+               socket.tokenExpiresAt = (decoded as any).exp * 1000;
+            }
+            logger.info(
+               `Authenticated socket connected (demo mode): ${socket.id}, user: ${decoded.userId}`,
+            );
+            return next();
+         }
+
          // Verify user exists
          const user = await prisma.user.findUnique({
             where: { id: decoded.userId },
@@ -462,6 +454,7 @@ export async function initializeSocket(
          socket.join(`user:${socket.userId}`);
          logger.info(`Socket ${socket.id} auto-joined user:${socket.userId}`);
 
+         if (!config.app.socketDemoMode) {
          // Issue #194: persist session metadata for reconnect continuity.
          // Fire-and-forget; a DB failure must never tear down a live socket.
          const userIdSnapshot = socket.userId;
@@ -472,7 +465,7 @@ export async function initializeSocket(
                walletAddress: walletSnapshot,
                socketId: socket.id,
             })
-            .then(resume => {
+            .then(async resume => {
                // Auto-rejoin rooms the user occupied before the drop. The
                // client also receives the resume payload so it can update
                // local UI state without a round-trip.
@@ -480,12 +473,26 @@ export async function initializeSocket(
                   socket.join(room);
                }
                socket.emit('session:resume', resume as ResumePayload);
+
+               // Issue #555: reconcile DB rooms against the adapter.
+               // If a previous instance crashed between a DB write and an adapter
+               // propagation, the DB may contain stale rooms. We also pick up any
+               // rooms the adapter added (e.g. the auto-joined user room) that are
+               // not yet in the DB.
+               const adapterRooms = Array.from(socket.rooms).filter(
+                  r => r !== socket.id,
+               );
+               void multiplayerSessionService.reconcileRooms(
+                  userIdSnapshot,
+                  adapterRooms,
+               );
             })
             .catch(err => {
                logger.warn(
                   `recordConnect failed for socket ${socket.id}: ${(err as Error).message}`
                );
             });
+         }
       }
 
       // Join round room for price updates and round events
@@ -517,17 +524,36 @@ export async function initializeSocket(
          }
 
          const room = roundId ? `round:${roundId}` : 'round';
-          socket.leave(room);
-          logger.info(`Socket ${socket.id} left room: ${room}`);
-          const leftPayload: RoomEventPayload = { room };
-          socket.emit('room:left', leftPayload);
-          if (socket.userId) {
-             void multiplayerSessionService.removeRoom(socket.userId, room);
-          }
-       });
+         socket.leave(room);
+         logger.info(`Socket ${socket.id} left room: ${room}`);
+         const leftPayload: RoomEventPayload = { room };
+         socket.emit('room:left', leftPayload);
+         if (socket.userId) {
+            void multiplayerSessionService.removeRoom(
+               socket.userId,
+               room,
+            ).then(() => {
+               // Issue #555: reconcile DB against adapter after leave to correct
+               // any drift from concurrent operations across instances.
+               const adapterRooms = Array.from(socket.rooms).filter(
+                  r => r !== socket.id,
+               );
+               void multiplayerSessionService.reconcileRooms(
+                  socket.userId!,
+                  adapterRooms,
+               );
+            });
+         }
+      });
 
       // Join chat room (requires authentication)
       socket.on('join:chat', () => {
+         if (config.app.socketDemoMode) {
+            socket.emit('error', {
+               message: 'Chat is unavailable in socket demo mode',
+            });
+            return;
+         }
          if (!socket.userId) {
             const errPayload: GenericErrorPayload = {
                message: 'Authentication required to join chat',
@@ -549,7 +575,19 @@ export async function initializeSocket(
          const leftChat: RoomEventPayload = { room: 'chat' };
          socket.emit('room:left', leftChat);
          if (socket.userId) {
-            void multiplayerSessionService.removeRoom(socket.userId, 'chat');
+            void multiplayerSessionService.removeRoom(
+               socket.userId,
+               'chat',
+            ).then(() => {
+               // Issue #555: reconcile after leave to keep DB in sync.
+               const adapterRooms = Array.from(socket.rooms).filter(
+                  r => r !== socket.id,
+               );
+               void multiplayerSessionService.reconcileRooms(
+                  socket.userId!,
+                  adapterRooms,
+               );
+            });
          }
       });
 
@@ -563,6 +601,15 @@ export async function initializeSocket(
             const ack = (payload: ChatAckPayload): void => {
                if (typeof callback === 'function') callback(payload);
             };
+
+            if (config.app.socketDemoMode) {
+               ack({
+                  ok: false,
+                  error: 'Chat is unavailable in socket demo mode',
+                  code: 'SEND_FAILED',
+               });
+               return;
+            }
 
             if (!socket.userId || !socket.walletAddress) {
                ack({
@@ -625,7 +672,7 @@ export async function initializeSocket(
       );
 
       // Join user notification room (for authenticated users)
-      socket.on('join:notifications', () => {
+      socket.on('join:notifications', (room?: string) => {
          if (!socket.userId) {
             const errPayload: GenericErrorPayload = {
                message: 'Authentication required for notifications',
@@ -633,13 +680,35 @@ export async function initializeSocket(
             socket.emit('error', errPayload);
             return;
          }
-         socket.join(`user:${socket.userId}`);
-         const joinedNotif: RoomEventPayload = { room: 'notifications' };
+
+         const targetRoom =
+            typeof room === 'string' && room.trim().length > 0
+               ? room.trim()
+               : `user:${socket.userId}`;
+
+         if (!isAuthorizedPrivateRoomJoin(socket, targetRoom)) {
+            const errPayload: GenericErrorPayload = {
+               message: `Unauthorized room join: ${targetRoom}. You can only join your own private room.`,
+            };
+            socket.emit('error', errPayload);
+            logger.warn(
+               `Blocked unauthorized room join for socket ${socket.id}: ${targetRoom} (user: ${socket.userId})`,
+            );
+            return;
+         }
+
+         socket.join(targetRoom);
+         // Ack with generic 'notifications' for backwards-compat when joining own room;
+         // if caller explicitly asked for a room name, echo that room so tests and
+         // multi-room clients can correlate.
+         const ackRoom =
+            targetRoom === `user:${socket.userId}` ? 'notifications' : targetRoom;
+         const joinedNotif: RoomEventPayload = { room: ackRoom as any };
+         // Also emit the concrete room for clients that track exact rooms (useful for testing ACL denial)
+         // To keep backwards-compat, we emit 'notifications' for the default case but the socket is
+         // actually in `user:${userId}`; multi-node emit via websocket.service still targets `user:${userId}`.
          socket.emit('room:joined', joinedNotif);
-         void multiplayerSessionService.addRoom(
-            socket.userId,
-            `user:${socket.userId}`
-         );
+         void multiplayerSessionService.addRoom(socket.userId, targetRoom);
       });
 
       // Issue #194: clients can checkpoint opaque session metadata
@@ -663,7 +732,7 @@ export async function initializeSocket(
             authenticated: String(Boolean(socket.userId)),
          });
          logger.info(`Client disconnected: ${socket.id}, reason: ${reason}`);
-         if (socket.userId) {
+         if (socket.userId && !config.app.socketDemoMode) {
             void multiplayerSessionService.recordDisconnect(socket.userId);
          }
       });
@@ -674,7 +743,11 @@ export async function initializeSocket(
       });
    });
 
-   logger.info('Socket.IO initialized with JWT authentication');
+   logger.info(
+      config.app.socketDemoMode
+         ? 'Socket.IO initialized in demo mode (no Prisma chat/session)'
+         : 'Socket.IO initialized with JWT authentication',
+   );
    return io;
 }
 

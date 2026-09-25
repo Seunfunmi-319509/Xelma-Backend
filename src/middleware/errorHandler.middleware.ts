@@ -3,7 +3,8 @@ import {
   PrismaClientKnownRequestError,
   PrismaClientValidationError,
 } from '@prisma/client/runtime/library';
-import { AppError, ValidationError, ErrorCode } from '../utils/errors';
+import { AppError, BackpressureError, ValidationError, ErrorCode } from '../utils/errors';
+import { CircuitBreakerOpenError } from '../utils/circuit-breaker';
 import logger from '../utils/logger';
 
 /**
@@ -18,6 +19,7 @@ export interface ErrorResponse {
   requestId?: string;
   details?: { field: string; message: string }[];
   timestamp?: string;
+  retryAfter?: number;
 }
 
 /**
@@ -60,7 +62,22 @@ export function errorHandler(
 ): void {
   let appError: AppError;
 
-  if (err instanceof AppError) {
+  let retryAfterSeconds: number | undefined;
+
+  if (err instanceof BackpressureError) {
+    appError = err;
+    retryAfterSeconds = err.retryAfterSeconds;
+  } else if (err instanceof CircuitBreakerOpenError) {
+    appError = new AppError(
+      'Contract service temporarily unavailable. Please retry shortly.',
+      503,
+      ErrorCode.EXTERNAL_SERVICE_ERROR,
+    );
+    retryAfterSeconds = Math.max(
+      1,
+      Math.ceil((err.nextAttemptAt.getTime() - Date.now()) / 1000),
+    );
+  } else if (err instanceof AppError) {
     appError = err;
   } else if (err instanceof PrismaClientKnownRequestError) {
     appError = fromPrismaError(err);
@@ -101,9 +118,14 @@ export function errorHandler(
     path: req.originalUrl,
     requestId,
     timestamp,
+    ...(retryAfterSeconds !== undefined && { retryAfter: retryAfterSeconds }),
     ...(appError.details && { details: appError.details }),
     ...(isDev && err instanceof Error && { stack: err.stack }),
   };
+
+  if (retryAfterSeconds !== undefined) {
+    res.setHeader('Retry-After', String(retryAfterSeconds));
+  }
 
   res.status(appError.statusCode).json(body);
 }
@@ -115,10 +137,10 @@ export function errorHandler(
  * Usage:
  * router.get('/path', asyncHandler(async (req, res) => { ... }));
  */
-export function asyncHandler(
-  fn: (req: Request, res: Response, next: NextFunction) => Promise<unknown>,
+export function asyncHandler<Req extends Request = Request>(
+  fn: (req: Req, res: Response, next: NextFunction) => Promise<unknown>,
 ) {
   return (req: Request, res: Response, next: NextFunction): void => {
-    Promise.resolve(fn(req, res, next)).catch(next);
+    Promise.resolve(fn(req as Req, res, next)).catch(next);
   };
 }

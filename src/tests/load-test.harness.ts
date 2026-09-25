@@ -55,6 +55,29 @@ export interface LoadTestConfig {
     maxP95LatencyMs: number;
     maxErrorRate: number;
   };
+  authBet: {
+    concurrency: number;
+    iterations: number;
+    minThroughputRps: number;
+    maxP95LatencyMs: number;
+    maxErrorRate: number;
+  };
+  idempotency: {
+    concurrency: number;
+    iterations: number;
+    maxP95LatencyMs: number;
+    maxErrorRate: number;
+  };
+  readRounds: {
+    concurrency: number;
+    iterations: number;
+    minThroughputRps: number;
+    maxP95LatencyMs: number;
+    maxErrorRate: number;
+  };
+  overload: {
+    betBurst: number;
+  };
   websocket: {
     clientCount: number;
     minDeliveryRate: number;
@@ -121,6 +144,71 @@ export function getLoadTestConfig(): LoadTestConfig {
         process.env.LOAD_TEST_PREDICTION_MAX_ERROR_RATE,
         0.05
       ),
+    },
+    authBet: {
+      concurrency: parsePositiveInt(
+        process.env.LOAD_TEST_BET_CONCURRENCY,
+        8
+      ),
+      iterations: parsePositiveInt(
+        process.env.LOAD_TEST_BET_ITERATIONS,
+        16
+      ),
+      minThroughputRps: parsePositiveFloat(
+        process.env.LOAD_TEST_BET_MIN_RPS,
+        3
+      ),
+      maxP95LatencyMs: parsePositiveInt(
+        process.env.LOAD_TEST_BET_P95_MS,
+        500
+      ),
+      maxErrorRate: parsePositiveFloat(
+        process.env.LOAD_TEST_BET_MAX_ERROR_RATE,
+        0.05
+      ),
+    },
+    idempotency: {
+      concurrency: parsePositiveInt(
+        process.env.LOAD_TEST_IDEMPOTENCY_CONCURRENCY,
+        8
+      ),
+      iterations: parsePositiveInt(
+        process.env.LOAD_TEST_IDEMPOTENCY_ITERATIONS,
+        16
+      ),
+      maxP95LatencyMs: parsePositiveInt(
+        process.env.LOAD_TEST_IDEMPOTENCY_P95_MS,
+        500
+      ),
+      maxErrorRate: parsePositiveFloat(
+        process.env.LOAD_TEST_IDEMPOTENCY_MAX_ERROR_RATE,
+        0.05
+      ),
+    },
+    readRounds: {
+      concurrency: parsePositiveInt(
+        process.env.LOAD_TEST_ROUNDS_CONCURRENCY,
+        10
+      ),
+      iterations: parsePositiveInt(
+        process.env.LOAD_TEST_ROUNDS_ITERATIONS,
+        30
+      ),
+      minThroughputRps: parsePositiveFloat(
+        process.env.LOAD_TEST_ROUNDS_MIN_RPS,
+        5
+      ),
+      maxP95LatencyMs: parsePositiveInt(
+        process.env.LOAD_TEST_ROUNDS_P95_MS,
+        150
+      ),
+      maxErrorRate: parsePositiveFloat(
+        process.env.LOAD_TEST_ROUNDS_MAX_ERROR_RATE,
+        0.05
+      ),
+    },
+    overload: {
+      betBurst: parsePositiveInt(process.env.LOAD_TEST_OVERLOAD_BET_BURST, 12),
     },
     websocket: {
       clientCount: parsePositiveInt(process.env.LOAD_TEST_WS_CLIENTS, 20),
@@ -223,12 +311,34 @@ export async function runConcurrentLoad(
 
 export function formatLoadTestReport(label: string, result: LoadTestResult): string {
   const { latencyMs } = result;
+  const statuses = countStatusCodes(result.samples);
+  const statusSummary = Object.entries(statuses)
+    .sort(([a], [b]) => Number(a) - Number(b))
+    .map(([code, count]) => `${code}×${count}`)
+    .join(" ");
+
   return [
     `[LOAD] ${label}`,
     `  total=${result.total} success=${result.successes} fail=${result.failures} errorRate=${(result.errorRate * 100).toFixed(1)}%`,
     `  duration=${result.durationMs}ms throughput=${result.throughputRps.toFixed(2)} rps`,
     `  latency ms: p50=${latencyMs.p50} p95=${latencyMs.p95} p99=${latencyMs.p99} max=${latencyMs.max}`,
+    `  statuses: ${statusSummary || "n/a"}`,
   ].join("\n");
+}
+
+export function countStatusCodes(
+  samples: LoadTestSample[]
+): Record<number, number> {
+  const counts: Record<number, number> = {};
+  for (const sample of samples) {
+    if (sample.statusCode === undefined) continue;
+    counts[sample.statusCode] = (counts[sample.statusCode] ?? 0) + 1;
+  }
+  return counts;
+}
+
+export function isControlledOverloadStatus(statusCode: number | undefined): boolean {
+  return statusCode === 200 || statusCode === 429 || statusCode === 503;
 }
 
 export function formatFanoutReport(

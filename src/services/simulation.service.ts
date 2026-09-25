@@ -96,7 +96,7 @@ class SimulationService {
         won: null,
         payout: toNumber(p.amount),
         amount: toNumber(p.amount),
-        side: p.side === 'UP' || p.side === 'DOWN' ? p.side : null,
+        side: (p.side ?? null) as 'UP' | 'DOWN' | null,
       }));
 
       return {
@@ -125,7 +125,7 @@ class SimulationService {
         won: false,
         payout: 0,
         amount: toNumber(p.amount),
-        side: p.side === 'UP' || p.side === 'DOWN' ? p.side : null,
+        side: (p.side ?? null) as 'UP' | 'DOWN' | null,
       }));
 
       return {
@@ -156,10 +156,10 @@ class SimulationService {
         const payout = calculatePayout(toDecimal(p.amount), winningPool, losingPool);
         const payoutNum = toNumber(payout);
         totalPayout += payoutNum;
-        return { won: true, payout: payoutNum, amount: toNumber(p.amount), side: p.side === 'UP' || p.side === 'DOWN' ? p.side : null };
+        return { won: true, payout: payoutNum, amount: toNumber(p.amount), side: (p.side ?? null) as 'UP' | 'DOWN' | null };
       }
       losers++;
-      return { won: false, payout: 0, amount: toNumber(p.amount), side: p.side === 'UP' || p.side === 'DOWN' ? p.side : null };
+      return { won: false, payout: 0, amount: toNumber(p.amount), side: (p.side ?? null) as 'UP' | 'DOWN' | null };
     });
 
     return {
@@ -214,7 +214,7 @@ class SimulationService {
         won: null,
         payout: toNumber(p.amount),
         amount: toNumber(p.amount),
-        side: p.side === 'UP' || p.side === 'DOWN' ? p.side : null,
+        side: (p.side ?? null) as 'UP' | 'DOWN' | null,
       }));
 
       return {
@@ -244,7 +244,7 @@ class SimulationService {
         won: false,
         payout: 0,
         amount: toNumber(p.amount),
-        side: p.side === 'UP' || p.side === 'DOWN' ? p.side : null,
+        side: (p.side ?? null) as 'UP' | 'DOWN' | null,
       }));
 
       return {
@@ -280,10 +280,10 @@ class SimulationService {
         const payout = calculatePayout(toDecimal(p.amount), decWinningPool, decLosingPool);
         const payoutNum = toNumber(payout);
         totalPayout += payoutNum;
-        return { won: true, payout: payoutNum, amount: toNumber(p.amount), side: p.side === 'UP' || p.side === 'DOWN' ? p.side : null };
+        return { won: true, payout: payoutNum, amount: toNumber(p.amount), side: (p.side ?? null) as 'UP' | 'DOWN' | null };
       }
       losers++;
-      return { won: false, payout: 0, amount: toNumber(p.amount), side: p.side === 'UP' || p.side === 'DOWN' ? p.side : null };
+      return { won: false, payout: 0, amount: toNumber(p.amount), side: (p.side ?? null) as 'UP' | 'DOWN' | null };
     });
 
     return {

@@ -2,14 +2,28 @@
  * Runtime preflight gate — validates critical startup conditions before
  * Express initializes. Fails fast with human-readable diagnostics.
  *
- * Checks performed:
- *  1. Required environment variables are present and non-empty.
- *  2. Node.js version meets the minimum declared in package.json (>=22.x).
- *  3. DATABASE_URL is parseable as a URL.
- *  4. JWT_SECRET has a minimum length to catch placeholder values.
+ * The checks are mode-aware based on DATA_MODE:
+ *   "mock"  — hackathon/demo mode: lightweight checks, no database required
+ *   "live"  — full production mode: strict checks on all required vars
+ *   unset   — defaults to "live" (full mode)
+ *
+ * Hackathon checks:
+ *  1. DATA_MODE is explicitly set to "mock"
+ *  2. JWT_SECRET is present and non-empty
+ *  3. Node.js version >= 22.x
+ *
+ * Full mode checks:
+ *  1. Required env vars (JWT_SECRET, DATABASE_URL) present and non-empty
+ *  2. Node.js version >= 22.x
+ *  3. DATABASE_URL is parseable as a URL
+ *  4. JWT_SECRET meets minimum length (16+ chars)
+ *  5. REDIS_URL (warning only)
  */
 
 import { execSync } from 'child_process';
+import logger from '../utils/logger';
+export type RuntimeMode = 'hackathon' | 'full';
+export type SafetyProfile = 'production' | 'demo';
 
 export interface PreflightResult {
   ok: boolean;
@@ -17,14 +31,28 @@ export interface PreflightResult {
   warnings: string[];
   nodeVersion: string;
   environment: string;
+  mode: RuntimeMode;
+  safetyProfile: SafetyProfile;
 }
 
-/** Variables that MUST be present for the server to function at all. */
-const REQUIRED_VARS: Record<string, string> = {
+/** Variables required in ALL modes. */
+const BASE_REQUIRED_VARS: Record<string, string> = {
   JWT_SECRET:
     'Generate a strong value, for example: openssl rand -base64 32',
+};
+
+/** Variables required ONLY in full (live) mode. */
+const FULL_REQUIRED_VARS: Record<string, string> = {
   DATABASE_URL:
     'Expected format: postgresql://user:pass@host:5432/database',
+};
+
+/** Variables required when SAFETY_PROFILE=production. */
+const PRODUCTION_REQUIRED_VARS: Record<string, string> = {
+  SOROBAN_ADMIN_SECRET:
+    'Production requires SOROBAN_ADMIN_SECRET for on-chain bet placement.',
+  SOROBAN_ORACLE_SECRET:
+    'Production requires SOROBAN_ORACLE_SECRET for round resolution.',
 };
 
 /** Minimum Node.js major version required (mirrors package.json engines). */
@@ -33,14 +61,68 @@ const MIN_NODE_MAJOR = 22;
 /** JWT_SECRET must be at least this long to prevent trivially-weak secrets. */
 const MIN_JWT_SECRET_LENGTH = 16;
 
-function checkRequiredEnvVars(env: NodeJS.ProcessEnv): string[] {
-  return Object.entries(REQUIRED_VARS)
+/**
+ * Detect runtime mode from environment.
+ * DATA_MODE=mock => hackathon, anything else => full.
+ */
+export function detectMode(env: NodeJS.ProcessEnv): RuntimeMode {
+  return env.DATA_MODE === 'mock' ? 'hackathon' : 'full';
+}
+
+/**
+ * Detect safety profile from environment.
+ * SAFETY_PROFILE=production => production, anything else => demo.
+ */
+export function detectSafetyProfile(env: NodeJS.ProcessEnv): SafetyProfile {
+  return env.SAFETY_PROFILE === 'production' ? 'production' : 'demo';
+}
+
+/**
+ * Return the env template file to recommend based on mode.
+ */
+function envTemplateForMode(mode: RuntimeMode): string {
+  return mode === 'hackathon' ? '.env.hackathon.example' : '.env.example';
+}
+
+function checkRequiredEnvVars(
+  env: NodeJS.ProcessEnv,
+  mode: RuntimeMode,
+  safetyProfile: SafetyProfile,
+): string[] {
+  const required = { ...BASE_REQUIRED_VARS };
+  if (mode === 'full') {
+    Object.assign(required, FULL_REQUIRED_VARS);
+  }
+  if (safetyProfile === 'production') {
+    Object.assign(required, PRODUCTION_REQUIRED_VARS);
+  }
+
+  return Object.entries(required)
     .filter(([name]) => !env[name] || env[name]!.trim().length === 0)
-    .map(
-      ([name, guidance]) =>
-        `Missing required environment variable: ${name}. ${guidance}. ` +
-        `Set it in .env (see .env.example) or in your deployment secrets.`,
-    );
+    .map(([name, guidance]) => {
+      const template = envTemplateForMode(mode);
+      if (mode === 'hackathon' && name === 'JWT_SECRET') {
+        return [
+          `Missing required environment variable: JWT_SECRET. `,
+          `In hackathon mode, set any non-empty string. `,
+          `Example: JWT_SECRET=dev-secret`,
+        ].join('');
+      }
+      return [
+        `Missing required environment variable: ${name}. ${guidance}. `,
+        `Set it in ${template} or in your deployment secrets.`,
+      ].join('');
+    });
+}
+
+function checkDataMode(env: NodeJS.ProcessEnv, mode: RuntimeMode): string[] {
+  if (mode === 'hackathon' && env.DATA_MODE !== 'mock') {
+    return [
+      `Hackathon mode requires DATA_MODE=mock. ` +
+        `Either set DATA_MODE=mock in .env, or remove it to run in full mode.`,
+    ];
+  }
+  return [];
 }
 
 function checkNodeVersion(): string[] {
@@ -56,9 +138,13 @@ function checkNodeVersion(): string[] {
   return [];
 }
 
-function checkDatabaseUrl(env: NodeJS.ProcessEnv): string[] {
+function checkDatabaseUrl(
+  env: NodeJS.ProcessEnv,
+  mode: RuntimeMode,
+): string[] {
+  if (mode !== 'full') return [];
   const url = env.DATABASE_URL;
-  if (!url) return []; // already caught by checkRequiredEnvVars
+  if (!url) return [];
   try {
     new URL(url);
     return [];
@@ -71,9 +157,13 @@ function checkDatabaseUrl(env: NodeJS.ProcessEnv): string[] {
   }
 }
 
-function checkJwtSecretStrength(env: NodeJS.ProcessEnv): string[] {
+function checkJwtSecretStrength(
+  env: NodeJS.ProcessEnv,
+  mode: RuntimeMode,
+): string[] {
   const secret = env.JWT_SECRET;
-  if (!secret) return []; // already caught by checkRequiredEnvVars
+  if (!secret) return [];
+  if (mode === 'hackathon') return [];
   if (secret.trim().length < MIN_JWT_SECRET_LENGTH) {
     return [
       `JWT_SECRET is too short (${secret.trim().length} chars). ` +
@@ -102,6 +192,35 @@ function checkRedisIfConfigured(env: NodeJS.ProcessEnv): string[] {
   }
 }
 
+function checkProductionSafetyProfile(
+  env: NodeJS.ProcessEnv,
+  safetyProfile: SafetyProfile,
+): string[] {
+  if (safetyProfile !== 'production') return [];
+
+  const errors: string[] = [];
+
+  // BET_STUB_MODE must NOT be true in production
+  if (env.BET_STUB_MODE === 'true') {
+    errors.push(
+      `BET_STUB_MODE=true is forbidden under SAFETY_PROFILE=production. ` +
+        `Stub mode bypasses on-chain settlement and is unsafe for real stakes. ` +
+        `Set BET_STUB_MODE=false or remove it, or switch to SAFETY_PROFILE=demo.`,
+    );
+  }
+
+  // SOROBAN_FAIL_CLOSED must be true in production
+  if (env.SOROBAN_FAIL_CLOSED !== 'true') {
+    errors.push(
+      `SAFETY_PROFILE=production requires SOROBAN_FAIL_CLOSED=true. ` +
+        `Current value: "${env.SOROBAN_FAIL_CLOSED ?? '(unset defaults to false)'}". ` +
+        `Fail-closed ensures bets abort when Soroban chain verification fails.`,
+    );
+  }
+
+  return errors;
+}
+
 /**
  * Run all preflight checks against the supplied environment.
  * Does NOT call process.exit — callers decide what to do with the result.
@@ -109,11 +228,16 @@ function checkRedisIfConfigured(env: NodeJS.ProcessEnv): string[] {
 export function runPreflightChecks(
   env: NodeJS.ProcessEnv = process.env,
 ): PreflightResult {
+  const mode: RuntimeMode = detectMode(env);
+  const safetyProfile: SafetyProfile = detectSafetyProfile(env);
+
   const errors: string[] = [
-    ...checkRequiredEnvVars(env),
+    ...checkRequiredEnvVars(env, mode, safetyProfile),
+    ...checkDataMode(env, mode),
     ...checkNodeVersion(),
-    ...checkDatabaseUrl(env),
-    ...checkJwtSecretStrength(env),
+    ...checkDatabaseUrl(env, mode),
+    ...checkJwtSecretStrength(env, mode),
+    ...checkProductionSafetyProfile(env, safetyProfile),
   ];
 
   const warnings: string[] = [...checkRedisIfConfigured(env)];
@@ -124,12 +248,57 @@ export function runPreflightChecks(
     warnings,
     nodeVersion: process.version,
     environment: env.NODE_ENV ?? 'development',
+    mode,
+    safetyProfile,
   };
 }
 
 /**
+ * Build a human-readable setup guide based on runtime mode.
+ */
+function setupGuide(mode: RuntimeMode, safetyProfile: SafetyProfile): string[] {
+  if (mode === 'hackathon') {
+    return [
+      'Local hackathon setup:',
+      '  1. cp .env.hackathon.example .env',
+      '  2. Set JWT_SECRET to any non-empty string',
+      '  3. Ensure DATA_MODE=mock is set',
+      '  4. npm run dev:hackathon',
+      '',
+      'Deployment (Render) hackathon setup:',
+      '  - Use the "xelma-backend-hackathon" service profile in render.yaml',
+      '  - Configure JWT_SECRET as a secret env var',
+      '  - DATA_MODE=mock is pre-configured in render.yaml',
+      '',
+    ];
+  }
+  const lines = [
+    'Local full-mode setup:',
+    '  1. cp .env.example .env',
+    '  2. Fill in DATABASE_URL with a running PostgreSQL connection string',
+    '  3. Fill in JWT_SECRET (16+ chars; generate with: openssl rand -base64 32)',
+    '  4. npm run dev',
+    '',
+    'Deployment (Render) full-mode setup:',
+    '  - Use the "xelma-backend" service profile in render.yaml',
+    '  - Configure DATABASE_URL, JWT_SECRET, and Soroban secrets as secret env vars',
+    '',
+  ];
+  if (safetyProfile === 'production') {
+    lines.push(
+      'Production safety profile (SAFETY_PROFILE=production):',
+      '  - BET_STUB_MODE must be false or unset',
+      '  - SOROBAN_FAIL_CLOSED must be true',
+      '  - SOROBAN_ADMIN_SECRET and SOROBAN_ORACLE_SECRET are required',
+      '',
+    );
+  }
+  return lines;
+}
+
+/**
  * Run preflight checks and exit the process with code 1 if any fail.
- * Safe to call from src/index.ts before createApp().
+ * Safe to call from src/index.ts or src/server.ts before createApp().
  *
  * In test environments (NODE_ENV=test or JEST_WORKER_ID set) the function
  * throws a PreflightError instead of calling process.exit so test suites
@@ -142,7 +311,7 @@ export function assertPreflightOrExit(
 
   if (result.warnings.length > 0) {
     for (const w of result.warnings) {
-      console.warn(`[preflight] WARNING: ${w}`);
+       logger.warn("[preflight] WARNING", { warning: w });
     }
   }
 
@@ -157,13 +326,10 @@ export function assertPreflightOrExit(
       '',
       `  Node.js : ${result.nodeVersion}`,
       `  Env     : ${result.environment}`,
+      `  Mode    : ${result.mode.toUpperCase()}`,
+      `  Profile : ${result.safetyProfile.toUpperCase()}`,
       '',
-      'Local setup:',
-      '  1. cp .env.example .env',
-      '  2. Fill in DATABASE_URL and JWT_SECRET',
-      '  3. npm run dev:render-parity or npm run dev',
-      '',
-      'Deployment setup: configure the same variables as secrets/env vars.',
+      ...setupGuide(result.mode, result.safetyProfile),
       '',
     ];
 
@@ -174,7 +340,7 @@ export function assertPreflightOrExit(
       throw new PreflightError(result.errors, lines.join('\n'));
     }
 
-    console.error(lines.join('\n'));
+       logger.error("Preflight failed", { errors: lines.join('\n') });
     process.exit(1);
   }
 }

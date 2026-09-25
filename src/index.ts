@@ -1,388 +1,186 @@
-const nodeMajorVersion = parseInt(process.versions.node.split('.')[0], 10);
-if (nodeMajorVersion < 22 && process.env.NODE_ENV !== 'test') {
-  console.error(`🔥 CRITICAL ERROR: Application startup failed.`);
-  console.error(`Node.js v22.x or higher is required. You are running v${process.version}.`);
-  console.error(`Please upgrade Node.js to avoid local vs Render mismatches.`);
-  process.exit(1);
-}
-
-import express, { Express, Request, Response, NextFunction } from 'express';
-import cors from 'cors';
+import './utils/check-node-version';
 import dotenv from 'dotenv';
-import { assertPreflightOrExit } from './config/preflight';
+import path from 'path';
 import { createServer, Server as HttpServer } from 'http';
-import authRoutes from './routes/auth.routes';
-import userRoutes from './routes/user.routes';
-import roundsRoutes from './routes/rounds.routes';
-import betsRoutes from './routes/bets.routes';
-import predictionsRoutes from './routes/predictions.routes';
-import educationRoutes from './routes/education.routes';
-import leaderboardRoutes from './routes/leaderboard.routes';
-import notificationsRoutes from './routes/notifications.routes';
+import { Express } from 'express';
+
+import { assertPreflightOrExit } from './config/preflight';
+import config from './config';
+import { createApp as createAppFromFactory } from './app-factory';
+import logger from './utils/logger';
+import {
+  formatBindingsReport,
+  resolveBindingsPolicy,
+  validateVendoredBindings,
+} from './utils/bindings-validator';
+import { formatResolvedSorobanConfigForLog, resolveSorobanEnvVars } from './config/env';
 import priceOracle from './services/oracle';
-import sorobanService from './services/soroban.service';
 import websocketService from './services/websocket.service';
 import schedulerService from './services/scheduler.service';
 import roundSchedulerService from './services/round-scheduler.service';
 import oracleService from './services/oracle.service';
-import logger from './utils/logger';
-import { validateVendoredBindings } from './utils/bindings-validator';
-import { errorHandler } from './middleware/errorHandler.middleware';
-import config from './config';
-import { metricsMiddleware } from './middleware/metrics.middleware';
-import { requestIdMiddleware } from './middleware/requestId.middleware';
-import metricsRoutes from './routes/metrics.routes';
-import adminMetricsRoutes from './routes/admin-metrics.routes';
-import errorsRoutes from './routes/errors.routes';
-import corsDiagnosticsRoutes from './routes/admin-cors-diagnostics.routes';
-import deadLetterRoutes from './routes/admin-dead-letter.routes';
-import healthRoutes from './routes/health';
-import chatRoutes from './routes/chat.routes';
-import tournamentsRoutes from './routes/tournaments.routes';
-import pricesRoutes from './routes/prices';
-import swaggerUi from 'swagger-ui-express';
-import { swaggerSpec } from './docs/openapi';
 import { initializeSocket, closeWebSocket } from './socket';
 import { prisma } from './lib/prisma';
-import path from 'path';
-import { Router } from 'express';
 
 const envFile = process.env.NODE_ENV === 'test' ? '.env.test' : '.env';
 dotenv.config({ path: path.resolve(process.cwd(), envFile), override: false });
 dotenv.config({ override: false });
 
 export { getHttpCorsOrigins } from './utils/cors';
-import { getHttpCorsOrigins } from './utils/cors';
 
-/**
- * Apply security headers to every response.
- * Prevents common browser-based attacks without adding helmet as a dependency.
- */
-function securityHeaders(
-   _req: Request,
-   res: Response,
-   next: NextFunction
-): void {
-   res.setHeader('X-Content-Type-Options', 'nosniff');
-   res.setHeader('X-Frame-Options', 'DENY');
-   res.setHeader('X-XSS-Protection', '1; mode=block');
-   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-   res.setHeader('Content-Security-Policy', "default-src 'self'");
-   res.setHeader(
-      'Permissions-Policy',
-      'geolocation=(), camera=(), microphone=()'
-   );
-   next();
+function validateEnv(): void {
+  if (!process.env.JWT_SECRET) {
+    logger.error('Application startup failed: Missing required environment variable: JWT_SECRET', {
+      variable: 'JWT_SECRET',
+    });
+    process.exit(1);
+  }
 }
 
-const validateEnv = (): void => {
-   if (!process.env.JWT_SECRET) {
-      console.error('🔥 CRITICAL ERROR: Application startup failed.');
-      console.error('Missing required environment variable: JWT_SECRET');
-      console.error(
-         'Please configure this securely in your environment before starting the app.'
-      );
-      process.exit(1); // 1 indicates a failure/error state
-   }
-};
-
 /**
- * Validate the vendored @tevalabs/xelma-bindings package at startup so a
- * stale or partial vendor surfaces immediately, instead of as an opaque
- * "Cannot find module" deep inside the Soroban service later. Only logs —
- * never throws — because API-only deployments may run without Soroban.
+ * Fail fast on vendored-bindings skew.
+ *
+ * A vendor/xelma-bindings that no longer matches bindings.pin.json means the
+ * Soroban client may be calling contract methods that do not exist — a failure
+ * that otherwise only surfaces on a money path under load. Deployments that
+ * actually depend on Soroban refuse to boot; everything else logs an
+ * actionable warning. See resolveBindingsPolicy() and docs/bindings-upgrade.md.
  */
-function logBindingsValidation(): void {
-   const result = validateVendoredBindings();
-   if (result.ok) {
-      logger.info('Vendored bindings OK', {
-         vendorPath: result.info.vendorPath,
-         packageName: result.info.packageName,
-         commitSha: result.info.commitSha,
-      });
-   } else {
-      logger.warn(
-         'Vendored bindings validation failed; Soroban integration may fail at runtime',
-         {
-            vendorPath: result.info.vendorPath,
-            errors: result.errors,
-            commitSha: result.info.commitSha,
-         }
-      );
-   }
+function checkVendoredBindings(): void {
+  const policy = resolveBindingsPolicy(process.env);
+  if (policy === 'off') {
+    logger.debug('Vendored bindings check disabled (BINDINGS_CHECK=off)');
+    return;
+  }
+
+  const result = validateVendoredBindings();
+  const details = {
+    vendorPath: result.info.vendorPath,
+    packageName: result.info.packageName,
+    commitSha: result.info.commitSha,
+    expectedCommitSha: result.info.expectedCommitSha,
+  };
+
+  if (result.ok) {
+    logger.info('Vendored bindings OK', {
+      ...details,
+      contractMethodsVerified: result.info.specMethods.length,
+    });
+    for (const warning of result.warnings) {
+      logger.warn(`Vendored bindings: ${warning}`, details);
+    }
+    return;
+  }
+
+  if (policy === 'strict') {
+    logger.error(
+      'Application startup failed: vendored @tevalabs/xelma-bindings does not match ' +
+        'bindings.pin.json. Refusing to start with a possibly-mismatched contract client.',
+      { ...details, errors: result.errors, remediation: result.remediation },
+    );
+    // Printed unstructured too: the remediation steps must survive whatever
+    // log shipper the deployment uses.
+    process.stderr.write(`${formatBindingsReport(result)}\n`);
+    process.exit(1);
+  }
+
+  logger.warn(
+    'Vendored bindings validation failed; Soroban integration may fail at runtime. ' +
+      'Set BINDINGS_CHECK=strict to make this fatal.',
+    { ...details, errors: result.errors, remediation: result.remediation },
+  );
 }
 
-// Run preflight gate before anything else initializes
 assertPreflightOrExit();
-
-// Execute validation immediately
 validateEnv();
-logBindingsValidation();
+checkVendoredBindings();
 logger.info(`Active DATA_MODE=${config.app.dataMode}`);
 logger.info(`ROUNDS_MOCK_MODE=${config.app.roundsMockMode}`);
+logger.info(`Safety profile: ${config.app.safetyProfile.toUpperCase()}`);
+logger.info(
+  'Soroban configuration resolved',
+  formatResolvedSorobanConfigForLog(resolveSorobanEnvVars(), {
+    rpcUrl: config.soroban.rpcUrl,
+    network: config.soroban.network,
+  }),
+);
 
-const betStubMode = process.env.BET_STUB_MODE === "true";
-logger.info(`Bet mode: ${betStubMode ? "STUB (no on-chain calls)" : "ON-CHAIN (Soroban)"}`, {
+const betStubMode = process.env.BET_STUB_MODE === 'true';
+logger.info(`Bet mode: ${betStubMode ? 'STUB (no on-chain calls)' : 'ON-CHAIN (Soroban)'}`, {
   BET_STUB_MODE: betStubMode,
 });
-logger.info('Runtime modes documented at docs/runtime-modes.md');
 
-/**
- * Create and configure the Express app without starting any background
- * jobs or binding to a network port. Safe to import in tests.
- */
 export function createApp(): Express {
-   const app = express();
+  const app = createAppFromFactory({ mode: 'full' }) as Express;
 
-   // Security headers (before all routes)
-   app.use(securityHeaders);
+  app.get('/test-error', (_req, _res, next) => {
+    const { ValidationError } = require('./utils/errors');
+    const err = new ValidationError('Explicitly triggered test exception handler pass-through');
+    err.name = err.message;
+    next(err);
+  });
 
-   // CORS — origin allowlist is driven by CLIENT_URL / ALLOWED_ORIGINS env vars
-   app.use(
-      cors({
-         origin: getHttpCorsOrigins(),
-         methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-         allowedHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key'],
-         credentials: true,
-      })
-   );
-
-   app.use(express.json());
-   app.use(express.urlencoded({ extended: true }));
-
-   // Request ID middleware (first, so all subsequent middleware has access)
-   app.use(requestIdMiddleware);
-
-   // Prometheus metrics middleware (before routes so all requests are tracked)
-   app.use(metricsMiddleware);
-
-   // Request logging middleware
-   app.use((req: Request, res: Response, next: NextFunction) => {
-      const requestId = (req as any).requestId;
-      logger.info(`${req.method} ${req.path}`, { requestId });
-      next();
-   });
-
-    // API Routes
-    app.use('/api/auth', authRoutes);
-    app.use('/api/user', userRoutes);
-    app.use('/api/rounds', roundsRoutes);
-    app.use('/api/bets', betsRoutes);
-    app.use('/api/predictions', predictionsRoutes);
-    app.use('/api/education', educationRoutes);
-    app.use('/api/leaderboard', leaderboardRoutes);
-    app.use('/api/chat', chatRoutes);
-    app.use('/api/notifications', notificationsRoutes);
-    app.use('/api/tournaments', tournamentsRoutes);
-    app.use('/api/admin/metrics', adminMetricsRoutes);
-    app.use('/api/errors', errorsRoutes);
-    app.use('/api/admin/cors-diagnostics', corsDiagnosticsRoutes);
-     app.use('/api/admin/dead-letter', deadLetterRoutes);
-     app.use('/health', healthRoutes);
-
-     // Versioned API v1 router (same routes, under /api/v1 prefix)
-    const v1Router = Router();
-    v1Router.use('/auth', authRoutes);
-    v1Router.use('/user', userRoutes);
-    v1Router.use('/rounds', roundsRoutes);
-    v1Router.use('/bets', betsRoutes);
-    v1Router.use('/predictions', predictionsRoutes);
-    v1Router.use('/education', educationRoutes);
-    v1Router.use('/leaderboard', leaderboardRoutes);
-    v1Router.use('/chat', chatRoutes);
-    v1Router.use('/notifications', notificationsRoutes);
-    v1Router.use('/tournaments', tournamentsRoutes);
-    v1Router.use('/admin/metrics', adminMetricsRoutes);
-    v1Router.use('/errors', errorsRoutes);
-    v1Router.use('/admin/cors-diagnostics', corsDiagnosticsRoutes);
-    v1Router.use('/admin/dead-letter', deadLetterRoutes);
-    app.use('/api/v1', v1Router);
-
-    // Deprecation headers for legacy unversioned /api/* paths
-    app.use('/api', (req, res, next) => {
-       if (!req.path.startsWith('/v1')) {
-          res.setHeader('Deprecation', 'true');
-          res.setHeader('Sunset', 'Sat, 01 Jan 2027 00:00:00 GMT');
-          res.setHeader('Link', `</api/v1${req.path}>; rel="successor-version"`);
-       }
-       next();
-    });
-
-   // Prometheus metrics endpoint
-   app.use('/metrics', metricsRoutes);
-
-   // Swagger UI (OpenAPI)
-   app.get('/docs', (req: Request, res: Response) =>
-      res.redirect(302, '/api-docs')
-   );
-   app.get('/api-docs.json', (req: Request, res: Response) =>
-      res.json(swaggerSpec)
-   );
-   app.use(
-      '/api-docs',
-      swaggerUi.serve,
-      swaggerUi.setup(swaggerSpec, { explorer: true })
-   );
-
-   // Hello World endpoint
-   app.get('/', (req: Request, res: Response) => {
-      res.json({
-         message: 'Hello World! Xelma Backend is running',
-         timestamp: new Date().toISOString(),
-         status: 'OK',
-      });
-    });
-
-    // Multi-asset prices via CoinGecko (BTC, ETH, XLM)
-   app.use('/api', pricesRoutes);
-
-   app.get('/test-error', (_req: Request, _res: Response, next: NextFunction) => {
-      const { ValidationError } = require('./utils/errors');
-      const err = new ValidationError('Explicitly triggered test exception handler pass-through');
-      err.name = err.message;
-      next(err);
-   });
-
-    // Price Oracle endpoint (returns price_usd as a precise decimal string)
-   app.get('/api/price', (req: Request, res: Response) => {
-      const price = priceOracle.getPriceString();
-      const lastUpdatedAt = priceOracle.getLastUpdatedAt();
-      res.json({
-         asset: 'XLM',
-         price_usd: price,
-         stale: priceOracle.isStale(),
-         provider: priceOracle.getLastProvider(),
-         lastUpdatedAt: lastUpdatedAt?.toISOString() ?? null,
-         source: priceOracle.getActiveSource(),
-         timestamp: new Date().toISOString(),
-      });
-   });
-
-   // 404 handler - forward to error handler for consistent response format
-   app.use((req: Request, res: Response, next: NextFunction) => {
-      const { NotFoundError } = require('./utils/errors');
-      next(new NotFoundError(`Route ${req.method} ${req.path} not found`));
-   });
-
-   // Centralized error handler (must be last)
-   app.use(errorHandler);
-
-   return app;
+  return app;
 }
 
 interface ServerHandle {
-   httpServer: HttpServer;
-   cleanup: () => Promise<void>;
+  httpServer: HttpServer;
+  cleanup: () => Promise<void>;
 }
 
-/**
- * Returns true when the process should run as a stateless API only —
- * no oracle polling, no cron schedulers, no WebSocket price ticker.
- * Useful for split deployments where one process owns background work
- * and others serve HTTP, and for safer local debugging.
- */
 export function isApiOnlyMode(): boolean {
-   const raw = process.env.API_ONLY;
-   if (!raw) return false;
-   return raw.toLowerCase() === 'true';
+  return process.env.API_ONLY?.toLowerCase() === 'true';
 }
 
-/**
- * Start background services, bind to a port, and return a handle that
- * can be used to shut everything down cleanly.
- *
- * When API_ONLY=true, schedulers, oracle polling, and the WebSocket
- * price ticker are skipped. The HTTP server (and Socket.IO transport)
- * still come up, so request-driven endpoints remain available.
- */
 export async function startServer(app: Express): Promise<ServerHandle> {
-   const PORT = process.env.PORT || 3000;
-   const httpServer = createServer(app);
-   const apiOnly = isApiOnlyMode();
+  const port = process.env.PORT || 3000;
+  const httpServer = createServer(app);
+  const apiOnly = isApiOnlyMode();
 
-   // Initialize Socket.IO with JWT authentication and Redis adapter
-   await initializeSocket(httpServer);
+  await initializeSocket(httpServer);
+  let priceInterval: NodeJS.Timeout | null = null;
 
-   let priceInterval: NodeJS.Timeout | null = null;
+  if (apiOnly) {
+    logger.info('API_ONLY=true: skipping oracle polling, round scheduler, and WebSocket price ticker.');
+    schedulerService.start();
+  } else {
+    priceOracle.startPolling();
+    schedulerService.start();
+    roundSchedulerService.start();
+    oracleService.start();
+    priceInterval = setInterval(() => {
+      const price = priceOracle.getPriceString();
+      if (price !== null) websocketService.emitPriceUpdate('XLM', price);
+    }, 5000);
+  }
 
-   if (apiOnly) {
-      logger.info(
-         'API_ONLY=true: skipping oracle polling, round scheduler, and WebSocket price ticker. Outbox poller and retention jobs still run.'
-      );
-      // The general scheduler (outbox poller, notification cleanup, retention)
-      // must run even in API_ONLY mode so outbox events written by this process
-      // are dispatched. Only oracle polling, round scheduling, and the price
-      // ticker are skipped.
-      schedulerService.start();
-   } else {
-      // Start Oracle Polling
-      priceOracle.startPolling();
+  const cleanup = async (): Promise<void> => {
+    if (priceInterval) clearInterval(priceInterval);
+    closeWebSocket();
+    if (!apiOnly) {
+      priceOracle.stopPolling();
+      roundSchedulerService.stop();
+      oracleService.stop();
+    }
+    schedulerService.stop();
+    httpServer.closeAllConnections();
+    await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+    await prisma.$disconnect();
+  };
 
-      // Initialize Schedulers
-      schedulerService.start();
-      roundSchedulerService.start();
-      oracleService.start();
-
-      // Emit price updates via WebSocket
-      priceInterval = setInterval(() => {
-         const price = priceOracle.getPriceString();
-         if (price !== null) {
-            websocketService.emitPriceUpdate('XLM', price);
-         }
-      }, 5000);
-   }
-
-   const cleanup = async () => {
-      logger.info('Shutting down gracefully...');
-      if (priceInterval) {
-         clearInterval(priceInterval);
-      }
-      closeWebSocket();
-      if (!apiOnly) {
-         priceOracle.stopPolling();
-         roundSchedulerService.stop();
-         oracleService.stop();
-      }
-      // Always stop the general scheduler (outbox poller, cleanup jobs)
-      schedulerService.stop();
-      httpServer.closeAllConnections();
-      await new Promise<void>((resolve) => {
-         httpServer.close(() => resolve());
-      });
-      await prisma.$disconnect();
-      logger.info('Shutdown complete');
-   };
-
-   httpServer.listen(PORT, () => {
-      logger.info(`Server is running on http://localhost:${PORT}`);
-      logger.info(`Socket.IO is ready for connections`);
-   });
-
-   return { httpServer, cleanup };
+  httpServer.listen(port, () => logger.info(`Server is running on http://localhost:${port}`));
+  return { httpServer, cleanup };
 }
 
-// Only start the server when this file is executed directly (not imported)
 const app = createApp();
 
 if (require.main === module) {
-   (async () => {
-      const { cleanup } = await startServer(app);
-
-      process.on('SIGINT', async () => {
-         await cleanup();
-         process.exit(0);
-      });
-
-      process.on('SIGTERM', async () => {
-         await cleanup();
-         process.exit(0);
-      });
-   })().catch(err => {
-      logger.error('Failed to start server', {
-         error: err instanceof Error ? err.message : String(err),
-      });
-      process.exit(1);
-   });
+  startServer(app).catch((error) => {
+    logger.error('Failed to start server', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    process.exit(1);
+  });
 }
 
 export default app;

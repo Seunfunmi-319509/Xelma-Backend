@@ -3,6 +3,7 @@ import { RoundMode } from "@tevalabs/xelma-bindings";
 import {
   mapSorobanActiveRound,
   mapSorobanRoundToFrontendCards,
+  resolveRoundMode,
 } from "../utils/soroban-round.mapper";
 
 describe("mapSorobanActiveRound", () => {
@@ -23,9 +24,9 @@ describe("mapSorobanActiveRound", () => {
       sorobanRoundId: "42",
       mode: "UP_DOWN",
       status: "ACTIVE",
-      startPrice: 1.2345,
-      poolUp: 5,
-      poolDown: 2.5,
+      startPrice: "1.23450000",
+      poolUp: "5.00000000",
+      poolDown: "2.50000000",
       startLedger: 1000,
       betEndLedger: 1100,
       endLedger: 1200,
@@ -47,7 +48,35 @@ describe("mapSorobanActiveRound", () => {
     });
 
     expect(mapped.mode).toBe("LEGENDS");
-    expect(mapped.startPrice).toBe(1);
+    expect(mapped.startPrice).toBe("1.00000000");
+  });
+
+  it("rejects an unrecognized round mode instead of silently mapping it", () => {
+    expect(() =>
+      mapSorobanActiveRound({
+        round_id: 1,
+        mode: 99 as RoundMode,
+        price_start: 10000,
+        pool_up: 0,
+        pool_down: 0,
+        start_ledger: 1,
+        bet_end_ledger: 2,
+        end_ledger: 3,
+      }),
+    ).toThrow(/Unsupported Soroban round mode/);
+  });
+});
+
+describe("resolveRoundMode", () => {
+  it("maps known modes", () => {
+    expect(resolveRoundMode(RoundMode.UpDown)).toBe("UP_DOWN");
+    expect(resolveRoundMode(RoundMode.Precision)).toBe("LEGENDS");
+  });
+
+  it("throws on an unknown mode value", () => {
+    expect(() => resolveRoundMode(99 as RoundMode)).toThrow(
+      /Unsupported Soroban round mode/,
+    );
   });
 });
 
@@ -72,8 +101,8 @@ describe("mapSorobanRoundToFrontendCards", () => {
     expect(liveCard?.asset).toBe("XLM");
     expect(liveCard?.source).toBe("live");
     expect(liveCard?.roundStatus).toBe("ACTIVE");
-    expect(liveCard?.priceData.startPrice).toBe(120);
-    expect(liveCard?.poolValues.upPool).toBe(2);
+    expect(liveCard?.priceData.startPrice).toBe("120.00000000");
+    expect(liveCard?.poolValues.upPool).toBe("2.00000000");
   });
 
   it("returns one live card and the rest mock cards for mixed output", () => {
@@ -117,7 +146,7 @@ describe("mapSorobanRoundToFrontendCards", () => {
         asset: expect.any(String),
         mode: expect.any(String),
         status: expect.any(String),
-        startPrice: expect.any(Number),
+        startPrice: expect.any(String),
         source: expect.any(String),
         roundStatus: expect.any(String),
         roundTiming: expect.objectContaining({
@@ -125,8 +154,8 @@ describe("mapSorobanRoundToFrontendCards", () => {
           endsAt: expect.any(String),
         }),
         priceData: expect.objectContaining({
-          startPrice: expect.any(Number),
-          currentPrice: expect.any(Number),
+          startPrice: expect.any(String),
+          currentPrice: expect.any(String),
         }),
         poolValues: expect.any(Object),
         predictionMetadata: expect.objectContaining({

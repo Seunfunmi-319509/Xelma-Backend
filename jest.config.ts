@@ -1,12 +1,15 @@
 import type { Config } from "@jest/types";
 
-type ConfigType = Config.InitialOptions;
+type JestConfig = Config.InitialOptions;
 
 const integrationTestFiles = [
   "auth.routes.spec.ts",
   "auth-audit-integration.spec.ts",
   "auth-race.spec.ts",
   "batch-routes.spec.ts",
+  "bets-idempotency-concurrency.spec.ts",
+  "bets-idempotency-redis-outage.spec.ts",
+  "bets.routes.spec.ts",
   "concurrent-rounds.spec.ts",
   "db-pool-config.spec.ts",
   "decimal-precision.spec.ts",
@@ -22,21 +25,37 @@ const integrationTestFiles = [
   "notifications.routes.spec.ts",
   "performance.spec.ts",
   "prediction-concurrency.spec.ts",
+  "tournament-concurrency.spec.ts",
+  "tournament-lifecycle.spec.ts",
   "predictions.routes.spec.ts",
   "rate-limit-visibility.spec.ts",
+  "rate-limit-redis-store.integration.spec.ts",
   "requestId.middleware.spec.ts",
   "requestId.spec.ts",
   "resolution-concurrency.spec.ts",
+  "resolution-fail-closed.spec.ts",
   "round.spec.ts",
   "rounds.routes.spec.ts",
+  "round.service.active.spec.ts",
+  "rounds-active.routes.spec.ts",
+  "error.spec.ts",
+  "data-mode.spec.ts",
   "security.spec.ts",
+  "hackathon-endpoints.spec.ts",
+  "monetary-serialization.spec.ts",
+  "tournaments.routes.spec.ts",
+  "route-parity.spec.ts",
   "socket.spec.ts",
   "user.routes.spec.ts",
   "validate.middleware.spec.ts",
+  "redis-adapter.spec.ts",
 ];
 
+const escapeRegExp = (value: string): string =>
+  value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 // Base configuration shared between unit and integration tests
-const baseConfig: Partial<ConfigType> = {
+const baseConfig: Partial<JestConfig> = {
   preset: "ts-jest",
   testEnvironment: "node",
   roots: ["<rootDir>/src"],
@@ -57,7 +76,7 @@ const baseConfig: Partial<ConfigType> = {
 };
 
 // Unit tests - fast, no external dependencies
-const unitConfig: ConfigType = {
+const unitConfig: JestConfig = {
   ...baseConfig,
   displayName: "unit",
   testMatch: [
@@ -65,14 +84,19 @@ const unitConfig: ConfigType = {
   ],
   testPathIgnorePatterns: [
     "/node_modules/",
-    // Integration test files (DB, HTTP listener, or cross-service tests)
-    ...integrationTestFiles,
+    // Integration test files (DB, HTTP listener, or cross-service tests).
+    // Anchored on the path separator so a bare basename such as
+    // "bets.routes.spec.ts" cannot also swallow "hackathon-bets.routes.spec.ts",
+    // which would leave that suite matched by neither project and never run.
+    ...integrationTestFiles.map(
+      (file) => `[\\/]${escapeRegExp(file)}$`,
+    ),
   ],
   setupFiles: ["<rootDir>/jest.setup.js"],
 };
 
 // Integration tests - require PostgreSQL and services
-const integrationConfig: ConfigType = {
+const integrationConfig: JestConfig = {
   ...baseConfig,
   displayName: "integration",
   testMatch: [
@@ -81,7 +105,7 @@ const integrationConfig: ConfigType = {
   setupFiles: ["<rootDir>/jest.setup.js"],
 };
 
-const config: ConfigType = {
+const config: JestConfig = {
   ...baseConfig,
   testMatch: ["**/*.spec.ts"],
   setupFiles: ["<rootDir>/jest.setup.js"],
@@ -110,12 +134,23 @@ const config: ConfigType = {
     "/src/__mocks__/",
     "/src/tests/",
   ],
+  // Coverage floors, raised incrementally as under-covered modules gain
+  // tests (see src/tests/{challenge,payout,response,timeout-wrapper}*
+  // .spec.ts, added specifically to close gaps here). Lines/statements were
+  // the weakest floor relative to branches/functions, since money-path
+  // services had branch coverage from error-path tests but many pure
+  // utility modules had none at all.
+  //
+  // Follow-up plan: once round-scheduler.service, resolution.service, and
+  // the Soroban integration layer have direct unit tests (currently
+  // exercised only indirectly via route specs), raise this again toward
+  // lines/statements 50, functions 65, branches 75.
   coverageThreshold: {
     global: {
-      branches: 70,
-      functions: 50,
-      lines: 35,
-      statements: 35,
+      branches: 71,
+      functions: 51,
+      lines: 38,
+      statements: 38,
     },
   },
 };

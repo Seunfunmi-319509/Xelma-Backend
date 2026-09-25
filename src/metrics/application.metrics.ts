@@ -156,6 +156,47 @@ export function recordOracleHealth(snapshot: OracleHealthSnapshot): void {
    );
 }
 
+/**
+ * Payout reconciliation worker (Issue #492).
+ *
+ * These make stuck-payout sweeps observable: how many claim txs the worker
+ * submits, how claims resolve, and how many are flagged for operator review.
+ * `payoutClaimsInFlight` is refreshed by the worker after every run.
+ *
+ * Alert-worthy:
+ * - `payout_claims_flagged_total{reason="chain_reverted"}` > 0 — the contract
+ *   rejected a claim; an operator must investigate before any further retry.
+ * - `payout_claims_in_flight{status="NEEDS_MANUAL_REVIEW"}` sustained — the
+ *   sweeper is stuck and needs human action.
+ */
+export const payoutClaimsSubmittedTotal = new Counter({
+   name: 'payout_claims_submitted_total',
+   help: 'Payout claim transactions submitted, by source (user endpoint or worker)',
+   labelNames: ['source'] as const,
+   registers: [metricsRegistry],
+});
+
+export const payoutClaimsResolvedTotal = new Counter({
+   name: 'payout_claims_resolved_total',
+   help: 'Payout claims resolved to a terminal state by the reconciliation worker',
+   labelNames: ['outcome'] as const,
+   registers: [metricsRegistry],
+});
+
+export const payoutClaimsFlaggedTotal = new Counter({
+   name: 'payout_claims_flagged_total',
+   help: 'Payout claims flagged NEEDS_MANUAL_REVIEW (max_attempts, chain_reverted)',
+   labelNames: ['reason'] as const,
+   registers: [metricsRegistry],
+});
+
+export const payoutClaimsInFlight = new Gauge({
+   name: 'payout_claims_in_flight',
+   help: 'Open payout claims by status (PENDING, SUBMITTED, FAILED, NEEDS_MANUAL_REVIEW, ...)',
+   labelNames: ['status'] as const,
+   registers: [metricsRegistry],
+});
+
 export const schedulerRunsTotal = new Counter({
    name: 'scheduler_runs_total',
    help: 'Total scheduler job executions by fixed job name and outcome',
@@ -184,10 +225,49 @@ export const circuitBreakerState = new Gauge({
    registers: [metricsRegistry],
 });
 
+/**
+ * Soroban RPC call latency histogram.
+ *
+ * Measures end-to-end duration (including retries and circuit-breaker
+ * overhead) for every Soroban contract call grouped by operation name.
+ *
+ * Buckets are chosen to cover the 15 s timeout range:
+ *   fast reads (< 1 s), moderate writes (1–5 s), slow/hanging (5–15 s+)
+ */
+export const sorobanRpcDurationSeconds = new Histogram({
+   name: 'soroban_rpc_duration_seconds',
+   help: 'Duration of Soroban RPC calls in seconds',
+   labelNames: ['operation'] as const,
+   buckets: [0.1, 0.25, 0.5, 1, 2.5, 5, 7.5, 10, 15],
+   registers: [metricsRegistry],
+});
+
+/**
+ * Total Soroban RPC calls labelled by operation name and outcome.
+ *
+ * outcome is one of:
+ *   success  — the call completed and the contract returned a value
+ *   failure  — the call failed (timeout, connection error, contract revert)
+ *   breaker_open — the circuit breaker was open, call was skipped
+ */
+export const sorobanRpcCallsTotal = new Counter({
+   name: 'soroban_rpc_calls_total',
+   help: 'Total number of Soroban RPC calls',
+   labelNames: ['operation', 'outcome'] as const,
+   registers: [metricsRegistry],
+});
+
 export const rateLimitHitsTotal = new Counter({
    name: 'rate_limit_hits_total',
    help: 'Total HTTP 429 responses from express-rate-limit handlers',
    labelNames: ['endpoint', 'category'] as const,
+   registers: [metricsRegistry],
+});
+
+export const rateLimitStoreFallbacksTotal = new Counter({
+   name: 'rate_limit_store_fallbacks_total',
+   help: 'Requests counted by the per-process fallback window because the Redis-backed rate-limit store was unreachable (Issue #520)',
+   labelNames: ['limiter'] as const,
    registers: [metricsRegistry],
 });
 
@@ -279,4 +359,90 @@ export const redisCacheHitRatio = new Gauge({
       const total = m.hits + m.misses;
       this.set(total > 0 ? m.hits / total : 0);
    }
+});
+
+/**
+ * Distributed lock metrics (Issue #601).
+ *
+ * These make single-leader behaviour observable across replicas. `lock` is the
+ * fixed job name (create-round, oracle-resolve-rounds, ...), so cardinality is
+ * bounded by the number of scheduled jobs.
+ *
+ * Expected steady state on an N-replica deploy: one `acquired` and N-1 `denied`
+ * per tick, a flat stream of `renewed`, and zero `stolen`/`expired`.
+ *
+ * Alert-worthy:
+ * - `distributed_lock_lost_total{reason="stolen"}` > 0 — two instances briefly
+ *   believed they were the leader; the TTL is too short for the heartbeat, or
+ *   the event loop stalled.
+ * - `distributed_lock_acquisitions_total{outcome="unavailable"}` climbing — Redis
+ *   is down and every replica is now skipping the job (fail-closed).
+ * - `distributed_lock_acquisitions_total{outcome="unlocked"}` > 0 on a
+ *   multi-replica deploy — REDIS_URL is missing and jobs are running unguarded.
+ */
+export const distributedLockAcquisitionsTotal = new Counter({
+   name: 'distributed_lock_acquisitions_total',
+   help: 'Distributed lock acquisition attempts by lock name and outcome (acquired, denied, denied_local, unavailable, unlocked, error)',
+   labelNames: ['lock', 'outcome'] as const,
+   registers: [metricsRegistry],
+});
+
+export const distributedLockRenewalsTotal = new Counter({
+   name: 'distributed_lock_renewals_total',
+   help: 'Distributed lock heartbeat renewals by lock name and outcome (renewed, stolen, expired, error)',
+   labelNames: ['lock', 'outcome'] as const,
+   registers: [metricsRegistry],
+});
+
+export const distributedLockLostTotal = new Counter({
+   name: 'distributed_lock_lost_total',
+   help: 'Times a held distributed lock was lost mid-job, by reason (stolen, expired, redis_error, max_hold_exceeded)',
+   labelNames: ['lock', 'reason'] as const,
+   registers: [metricsRegistry],
+});
+
+export const distributedLocksHeld = new Gauge({
+   name: 'distributed_locks_held',
+   help: 'Number of distributed locks currently held by this instance, by lock name',
+   labelNames: ['lock'] as const,
+   registers: [metricsRegistry],
+});
+
+export const distributedLockHeldSeconds = new Histogram({
+   name: 'distributed_lock_held_seconds',
+   help: 'How long distributed locks were held, in seconds. Compare against the lock TTL when tuning.',
+   labelNames: ['lock'] as const,
+   buckets: [0.05, 0.25, 1, 5, 15, 30, 60, 120, 300, 600],
+   registers: [metricsRegistry],
+});
+
+/**
+ * Tournament saga violations (Issue #502).
+ *
+ * Incremented whenever a tournament lifecycle transition (create -> join ->
+ * lock -> settle -> payout, plus cancel) is rejected as out-of-order — e.g.
+ * locking a COMPLETED tournament or settling one that was never locked.
+ * `from`/`to` are low-cardinality status labels, so this metric stays
+ * alert-able without exploding cardinality. A sustained nonzero rate means
+ * clients are driving the saga out of order and should be fixed.
+ */
+export const tournamentTransitionFailuresTotal = new Counter({
+   name: 'tournament_transition_failures_total',
+   help: 'Total tournament lifecycle transitions rejected as out-of-order',
+   labelNames: ['from', 'to'] as const,
+   registers: [metricsRegistry],
+});
+
+/**
+ * Round state-machine violations (round lifecycle engine).
+ *
+ * Incremented whenever a round lifecycle transition (PENDING -> ACTIVE ->
+ * LOCKED -> RESOLVED, plus cancel) is rejected as out-of-order or loses a
+ * compare-and-set race. `from`/`to` are low-cardinality status labels.
+ */
+export const roundTransitionFailuresTotal = new Counter({
+   name: 'round_transition_failures_total',
+   help: 'Total round lifecycle transitions rejected as out-of-order',
+   labelNames: ['from', 'to'] as const,
+   registers: [metricsRegistry],
 });

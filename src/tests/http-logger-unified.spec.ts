@@ -1,0 +1,172 @@
+/**
+ * Assertion test: both hackathon and production apps produce the same
+ * HTTP request log shape (method, path, status, durationMs, requestId).
+ *
+ * Run:  npx jest src/tests/http-logger-unified.spec.ts
+ */
+
+import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import request from 'supertest';
+
+const mockLogInfo = jest.fn();
+
+jest.mock('../utils/logger', () => ({
+  __esModule: true,
+  default: {
+    info: (...args: any[]) => mockLogInfo(...args),
+    warn: jest.fn(),
+    error: jest.fn(),
+    debug: jest.fn(),
+  },
+}));
+
+// Mocks required by the production app (index.ts)
+jest.mock('../services/soroban.service', () => ({
+  __esModule: true,
+  default: { getActiveRound: jest.fn().mockResolvedValue(null), isReady: jest.fn().mockReturnValue(false) },
+}));
+
+// GET /api/rounds delegates to round.service.getRoundsForApi; mock it so the
+// route returns 200 without a database.
+jest.mock('../services/round.service', () => ({
+  __esModule: true,
+  default: { getRoundsForApi: jest.fn().mockResolvedValue({ source: 'mock', rounds: [] }) },
+}));
+
+// Both apps are now built by the same factory, so importing either one loads
+// every router — including src/routes/rounds.ts, which needs betRateLimiter.
+// An omitted export here surfaces as "Route.post() requires a callback
+// function but got a [object Undefined]" at import time.
+jest.mock('../middleware/rateLimiter.middleware', () => {
+  const pass = (_req: any, _res: any, next: any) => next();
+  return {
+    apiRateLimiter: pass,
+    writeRateLimiter: pass,
+    betRateLimiter: pass,
+    adminRoundRateLimiter: pass,
+    oracleResolveRateLimiter: pass,
+    challengeRateLimiter: pass,
+    connectRateLimiter: pass,
+    authRateLimiter: pass,
+    chatMessageRateLimiter: pass,
+    predictionRateLimiter: pass,
+    batchPredictionRateLimiter: pass,
+    batchLeaderboardRateLimiter: pass,
+  };
+});
+
+jest.mock('../lib/prisma', () => ({ prisma: {} }));
+
+const EXPECTED_FIELDS = ['method', 'path', 'status', 'durationMs', 'requestId'];
+
+function getLastHttpLog(): Record<string, any> | undefined {
+  const calls = mockLogInfo.mock.calls;
+  for (let i = calls.length - 1; i >= 0; i--) {
+    if (calls[i][0] === 'http request') {
+      return calls[i][1];
+    }
+  }
+  return undefined;
+}
+
+describe('HTTP request log shape is identical across apps', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  describe('hackathon app (src/app.ts)', () => {
+    it('logs every expected field on GET /api/rounds', async () => {
+      const { createApp } = await import('../app');
+      const app = createApp();
+
+      await request(app).get('/api/rounds');
+
+      const log = getLastHttpLog();
+      expect(log).toBeDefined();
+
+      for (const field of EXPECTED_FIELDS) {
+        expect(log).toHaveProperty(field);
+      }
+
+      expect(log!.method).toBe('GET');
+      expect(log!.path).toBe('/api/rounds');
+      expect(typeof log!.status).toBe('number');
+      expect(typeof log!.durationMs).toBe('number');
+      expect(typeof log!.requestId).toBe('string');
+    });
+
+    it('includes requestId even without client header', async () => {
+      const { createApp } = await import('../app');
+      const app = createApp();
+
+      await request(app).get('/api/health');
+
+      const log = getLastHttpLog();
+      expect(log!.requestId).toBeTruthy();
+    });
+
+    it('propagates client X-Request-ID header into requestId field', async () => {
+      const { createApp } = await import('../app');
+      const app = createApp();
+
+      await request(app).get('/api/health').set('X-Request-ID', 'client-trace-1');
+
+      const log = getLastHttpLog();
+      expect(log!.requestId).toBe('client-trace-1');
+    });
+
+    it('logs the correct status code', async () => {
+      const { createApp } = await import('../app');
+      const app = createApp();
+
+      await request(app).get('/api/rounds');
+
+      const log = getLastHttpLog();
+      expect([200, 304]).toContain(log!.status);
+    });
+  });
+
+  describe('production app (src/index.ts)', () => {
+    it('logs every expected field on GET /api/health', async () => {
+      const { createApp: createFullApp } = await import('../index');
+      const app = createFullApp();
+      await request(app).get('/api/health');
+
+      const log = getLastHttpLog();
+      expect(log).toBeDefined();
+
+      for (const field of EXPECTED_FIELDS) {
+        expect(log).toHaveProperty(field);
+      }
+
+      expect(log!.method).toBe('GET');
+      expect(typeof log!.status).toBe('number');
+      expect(typeof log!.durationMs).toBe('number');
+      expect(typeof log!.requestId).toBe('string');
+    });
+  });
+
+  describe('log field consistency', () => {
+    it('both apps produce the same set of log fields', async () => {
+      const { createApp: createFullApp } = await import('../index');
+      const fullApp = createFullApp();
+      await request(fullApp).get('/api/health');
+      const fullLog = getLastHttpLog();
+      const fullKeys = fullLog ? Object.keys(fullLog).filter(k => k !== 'cachedAt') : [];
+
+      const { createApp: createHackathonApp } = await import('../app');
+      const hackApp = createHackathonApp();
+      await request(hackApp).get('/api/health');
+      const hackLog = getLastHttpLog();
+      const hackKeys = hackLog ? Object.keys(hackLog).filter(k => k !== 'cachedAt') : [];
+
+      for (const key of EXPECTED_FIELDS) {
+        expect(fullKeys).toContain(key);
+        expect(hackKeys).toContain(key);
+      }
+
+      // Verify the two log shapes have the same fields
+      expect(fullKeys.sort()).toEqual(hackKeys.sort());
+    });
+  });
+});

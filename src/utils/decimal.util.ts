@@ -7,12 +7,23 @@ import { Decimal } from "@prisma/client/runtime/library";
  */
 
 /** Convert any numeric-like value to a Prisma Decimal */
-export function toDecimal(value: number | string | Decimal): Decimal {
+export function toDecimal(
+  value: number | string | Decimal | { toString(): string },
+): Decimal {
   if (value instanceof Decimal) return value;
-  return new Decimal(typeof value === "number" ? value.toString() : value);
+  if (typeof value === "number") return new Decimal(value.toString());
+  if (typeof value === "string") return new Decimal(value);
+  return new Decimal(value.toString());
 }
 
-/** Safely convert a Prisma Decimal to a JS number (for JSON serialization) */
+/**
+ * Canonical API scale for balances, stakes, payouts, and pools.
+ * Matches Prisma Decimal(20, 8).
+ */
+export const MONEY_SCALE = 8;
+export const ZERO_MONEY = "0.00000000";
+
+/** Safely convert a Prisma Decimal to a JS number (internal math / DB increments only — never API JSON) */
 export function toNumber(value: Decimal | number | null | undefined): number {
   if (value === null || value === undefined) return 0;
   if (typeof value === "number") return value;
@@ -72,8 +83,29 @@ export function decFixed(value: Decimal | number, places: number = 2): string {
 /** Serialize Decimal to a fixed-precision string for API boundaries */
 export function toDecimalString(
   value: Decimal | number | string | null | undefined,
-  places: number = 8,
+  places: number = MONEY_SCALE,
 ): string | null {
   if (value === null || value === undefined) return null;
   return toDecimal(value).toFixed(places);
+}
+
+export type MoneyInput = Decimal | number | string | { toString(): string } | null | undefined;
+
+/**
+ * Canonical required money field: always an 8-dp decimal string.
+ * Use at HTTP/WebSocket boundaries. Never return a JSON number.
+ */
+export function serializeMoney(value: MoneyInput): string {
+  if (value === null || value === undefined || value === "") {
+    return ZERO_MONEY;
+  }
+  return toDecimal(value).toFixed(MONEY_SCALE);
+}
+
+/** Canonical optional money field (payouts, end prices). */
+export function serializeNullableMoney(value: MoneyInput): string | null {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  return toDecimal(value).toFixed(MONEY_SCALE);
 }
