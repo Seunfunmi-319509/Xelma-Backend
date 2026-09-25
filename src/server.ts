@@ -1,5 +1,6 @@
 import dotenv from 'dotenv';
 import { createServer } from 'http';
+import logger from './utils/logger';
 
 dotenv.config();
 

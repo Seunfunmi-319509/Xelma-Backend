@@ -44,7 +44,7 @@ router.post(
   "/up-down",
   verifyStellarAuth,
   validate(upDownBetSchema),
-  async (req: any, res: Response, next: NextFunction) => {
+  (async (req: any, res: Response, next: NextFunction) => {
     const idempotencyKey = req.headers["idempotency-key"] as string | undefined;
     const userId = req.user.userId;
     const endpoint = "/api/bets/up-down";
@@ -113,7 +113,7 @@ router.post(
       }
       next(error);
     }
-  }) as any,
+  }) as any
 );
 
 /**
@@ -147,7 +147,7 @@ router.post(
   "/precision",
   verifyStellarAuth,
   validate(precisionBetSchema),
-  async (req: any, res: Response, next: NextFunction) => {
+  (async (req: any, res: Response, next: NextFunction) => {
     const idempotencyKey = req.headers["idempotency-key"] as string | undefined;
     const userId = req.user.userId;
     const endpoint = "/api/bets/precision";
@@ -216,7 +216,7 @@ router.post(
       }
       next(error);
     }
-  }) as any,
+  }) as any
 );
 
 export default router;

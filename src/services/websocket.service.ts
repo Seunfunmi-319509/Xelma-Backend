@@ -33,7 +33,6 @@ type EventPayloadMap = {
   [K in keyof ServerToClientEvents]: Parameters<ServerToClientEvents[K]>[0];
 };
 
-interface SafeEmitInput<E extends WebSocketEventName> {
 /** Payload for live bet acceptance broadcasts (Issue #376). */
 export interface BetAcceptedPayload {
   roundId?: string;
@@ -45,10 +44,10 @@ export interface BetAcceptedPayload {
   txHash?: string;
 }
 
-interface SafeEmitInput {
+interface SafeEmitInput<E extends WebSocketEventName> {
   room: string;
   event: E;
-  payload: EventPayloadMap[E];
+  payload: E extends keyof EventPayloadMap ? EventPayloadMap[E] : any;
   userId?: string | null;
 }
 

@@ -22,6 +22,7 @@ import { hackathonSwaggerSpec } from './docs/hackathon-openapi';
 import config from './config';
 import logger from './utils/logger';
 import { requestIdMiddleware } from './middleware/requestId.middleware';
+import { ValidationError } from './utils/errors';
 
 export interface CreateAppOptions {
   includeErrorHandlers?: boolean;
@@ -88,6 +89,12 @@ export function createApp(options: CreateAppOptions = {}): Application {
   }
 
   app.use('/api', routes);
+
+  app.get('/test-error', (_req: Request, _res: Response, next: NextFunction) => {
+    const err = new ValidationError('Explicitly triggered test exception handler pass-through');
+    err.name = err.message;
+    next(err);
+  });
 
   // Centralized 404 and Error handlers registered last in the Express stack
   if (includeErrorHandlers) {

@@ -17,22 +17,18 @@ function sanitizeDatabaseUrl(raw: string): string {
 }
 
 export const prisma = (() => {
-  if (process.env.NODE_ENV === 'test') {
-    // Minimal mock to satisfy type expectations during unit tests.
+  if (process.env.NODE_ENV === 'test' && process.env.USE_PRISMA_MOCK === 'true') {
     const mock: Partial<PrismaClient> = {
       idempotencyKey: {
         deleteMany: async () => ({ count: 0 }) as any,
         findUnique: async () => null as any,
         upsert: async () => null as any,
-        // Add other model mocks if needed.
       },
-      // Add a generic $queryRaw mock for connectivity checks.
       $queryRaw: async () => null,
     } as any;
     return mock as PrismaClient;
   }
 
-  // Production / development client.
   return globalForPrisma.prisma || new PrismaClient({
     datasources: {
       db: { url: config.database.url },

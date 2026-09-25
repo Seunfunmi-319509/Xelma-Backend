@@ -32,8 +32,6 @@ class PriceOracle {
   private _running = false;
   private lastUpdatedAt: Date | null = null;
   private activeSource: string | null = null;
-  private readonly REQUEST_TIMEOUT = 5000;
-  private readonly MAX_RETRIES = 1;
 
   private constructor() {
     this.providerChain = [

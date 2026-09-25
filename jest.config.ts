@@ -1,4 +1,6 @@
-import type { Config } from "jest";
+import type { Config } from "@jest/types";
+
+type ConfigType = Config.InitialOptions;
 
 const integrationTestFiles = [
   "auth.routes.spec.ts",
@@ -34,7 +36,7 @@ const integrationTestFiles = [
 ];
 
 // Base configuration shared between unit and integration tests
-const baseConfig: Partial<Config> = {
+const baseConfig: Partial<ConfigType> = {
   preset: "ts-jest",
   testEnvironment: "node",
   roots: ["<rootDir>/src"],
@@ -55,7 +57,7 @@ const baseConfig: Partial<Config> = {
 };
 
 // Unit tests - fast, no external dependencies
-const unitConfig: Config = {
+const unitConfig: ConfigType = {
   ...baseConfig,
   displayName: "unit",
   testMatch: [
@@ -70,7 +72,7 @@ const unitConfig: Config = {
 };
 
 // Integration tests - require PostgreSQL and services
-const integrationConfig: Config = {
+const integrationConfig: ConfigType = {
   ...baseConfig,
   displayName: "integration",
   testMatch: [
@@ -79,7 +81,7 @@ const integrationConfig: Config = {
   setupFiles: ["<rootDir>/jest.setup.js"],
 };
 
-const config: Config = {
+const config: ConfigType = {
   ...baseConfig,
   testMatch: ["**/*.spec.ts"],
   setupFiles: ["<rootDir>/jest.setup.js"],
