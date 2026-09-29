@@ -111,16 +111,7 @@ logger.info(`Bet mode: ${betStubMode ? 'STUB (no on-chain calls)' : 'ON-CHAIN (S
 });
 
 export function createApp(): Express {
-  const app = createAppFromFactory({ mode: 'full' }) as Express;
-
-  app.get('/test-error', (_req, _res, next) => {
-    const { ValidationError } = require('./utils/errors');
-    const err = new ValidationError('Explicitly triggered test exception handler pass-through');
-    err.name = err.message;
-    next(err);
-  });
-
-  return app;
+  return createAppFromFactory({ mode: 'full' }) as Express;
 }
 
 interface ServerHandle {

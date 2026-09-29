@@ -4,7 +4,6 @@ import {
   AppFeatures,
   CreateAppOptions as FactoryOptions,
 } from './app-factory';
-import { ValidationError } from './utils/errors';
 
 export interface CreateAppOptions {
   includeErrorHandlers?: boolean;
@@ -16,15 +15,7 @@ export function createApp(options: CreateAppOptions = {}): Application {
     ...options,
     mode: 'hackathon',
   };
-  const app = createAppFromFactory(factoryOptions);
-
-  app.get('/test-error', (_req, _res, next) => {
-    const err = new ValidationError('Explicitly triggered test exception handler pass-through');
-    err.name = err.message;
-    next(err);
-  });
-
-  return app;
+  return createAppFromFactory(factoryOptions);
 }
 
 const app = createApp();

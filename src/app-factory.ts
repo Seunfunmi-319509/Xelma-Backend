@@ -42,6 +42,7 @@ import betAuditRoutes from './routes/admin-bet-audit.routes';
 import healthRoutes from './routes/health';
 import statsRoutes from './routes/stats';
 import indexRoutes from './routes/index';
+import { ValidationError } from './utils/errors';
 import pricesRoutes, { legacyXlmPriceRouter } from './routes/prices';
 
 // The two entrypoints deliberately serve different round and leaderboard
@@ -370,6 +371,17 @@ export function createApp(options: CreateAppOptions = {}): Application {
       });
     }
   }
+
+  // Deterministic hook for asserting the error-handler pass-through end to end
+  // (see src/__tests__/error.spec.ts). It has to be registered here, ahead of
+  // the 404 catch-all and the error handlers below: mounting it from an
+  // entrypoint after the factory returned would leave it unreachable, since the
+  // catch-all matches every request and ends the response first.
+  app.get('/test-error', (_req: Request, _res: Response, next: NextFunction) => {
+    const err = new ValidationError('Explicitly triggered test exception handler pass-through');
+    err.name = err.message;
+    next(err);
+  });
 
   if (includeErrorHandlers) {
     if (mode === 'full') {
