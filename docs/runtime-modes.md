@@ -115,6 +115,18 @@ routers is mounted is decided by the app mode — see
 
 ## Recommended combinations
 
+## Operator diagnostics
+
+The full application exposes `GET /api/admin/runtime-flags` to administrators.
+It returns only a whitelist of non-secret mode and scheduler flags, including
+`dataMode`, `dataStore`, `roundsMockMode`, and the scheduler state. It never
+returns `DATABASE_URL`, JWT secrets, Soroban secrets, or other credentials.
+The endpoint is not mounted by the hackathon app.
+
+Public price and stats responses use a 30-second browser/CDN cache aligned with
+the price service TTL. Health responses are always `no-store`; Redis and
+database caching are separate concerns from HTTP caching.
+
 ### 1. Full local development (no external deps)
 
 ```env
@@ -257,4 +269,3 @@ The multi-stage `Dockerfile` packages both full production (with live Soroban co
 | **Full Production (Live)** | `DATA_MODE=live`, `BET_STUB_MODE=false`, `API_MODE=full` | Verifies Soroban bindings, applies Prisma migrations, and boots full app `dist/index.js`. |
 | **Demo / Hackathon** | `DATA_MODE=mock`, `API_MODE=hackathon`, `RUN_MIGRATIONS=false` | Boots lightweight mock demo server `dist/server.js` without requiring external database or Soroban keys. |
 | **API Only** | `API_ONLY=true`, `BET_STUB_MODE=true` | Boots standard API server without running background schedulers or oracle loops. |
-
