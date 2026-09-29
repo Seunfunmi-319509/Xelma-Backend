@@ -2965,6 +2965,31 @@
         ]
       }
     },
+    "/api/admin/runtime-flags": {
+      "get": {
+        "summary": "Inspect safe runtime feature flags",
+        "description": "Returns the non-secret runtime flags for operators. Admin only.",
+        "tags": [
+          "Admin"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Safe runtime flag matrix"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Admin access required"
+          }
+        }
+      }
+    },
     "/api/admin/metrics/rate-limits": {
       "get": {
         "summary": "Rate-limit activity summary",
@@ -3171,9 +3196,14 @@
     "/api/admin/metrics/metrics": {
       "get": {
         "summary": "Scrape Prometheus metrics",
-        "description": "Returns standard flat text representations of all registered metrics.",
+        "description": "Returns standard flat text representations of all registered metrics.\nRequires an admin JWT or a valid METRICS_SCRAPE_TOKEN, matching the\npublic /metrics scrape endpoint.\n",
         "tags": [
           "Admin"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
         ],
         "responses": {
           "200": {
@@ -3185,6 +3215,12 @@
                 }
               }
             }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           }
         }
       }
